@@ -13,6 +13,7 @@
 #include "pm8150.dtsi"
 #include "pm8150b.dtsi"
 #include "pm8150l.dtsi"
+#include <dt-bindings/iio/qcom,spmi-vadc.h>
 #include <dt-bindings/soc/qcom,apr.h>
 #include <dt-bindings/sound/qcom,q6afe.h>
 #include <dt-bindings/sound/qcom,q6asm.h>
@@ -1803,4 +1804,276 @@
  */
 / {
 	crux,shutdown-critical = "ufs_device_wlun", "adreno", "msm";
+};
+
+
+/* ============================================================================
+ * [crux 2026-10-11]③ 蓝牙 WCN3990（走 uart13 = QUPv3 WRAP2 SE3 @0xc8c000）
+ * 依据厂商 DTB：qupv3_se13_4uart（4 线，qcom,wakeup-byte = 0xfd）
+ *   引脚 gpio43/44/46 = CTS/RX/RTS，gpio45 = TX（mux function = qup13）
+ *   BT_EN = tlmm gpio172（厂商 pinctrl 组名 bt_en_active）
+ * 供电：vddio/vddxo 1.8V(l7a)、vddrf 1.3V(l2c)、vddch0 3.3V(l11c)
+ * ============================================================================ */
+&tlmm {
+	qup_uart13_ctsrtsrx: qup-uart13-ctsrtsrx-state {
+		pins = "gpio43", "gpio44", "gpio46";
+		function = "qup13";
+		drive-strength = <2>;
+		bias-pull-down;
+	};
+
+	qup_uart13_tx: qup-uart13-tx-state {
+		pins = "gpio45";
+		function = "qup13";
+		drive-strength = <2>;
+		bias-pull-up;
+	};
+
+	bt_en_default: bt-en-default-state {
+		pins = "gpio172";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-pull-down;
+		output-high;
+	};
+};
+
+&uart13 {
+	status = "okay";
+	pinctrl-names = "default";
+	pinctrl-0 = <&qup_uart13_ctsrtsrx &qup_uart13_tx &bt_en_default>;
+
+	bluetooth {
+		compatible = "qcom,wcn3990-bt";
+
+		vddio-supply = <&vreg_l7a_1p8>;
+		vddxo-supply = <&vreg_l7a_1p8>;
+		vddrf-supply = <&vreg_l2c_1p3>;
+		vddch0-supply = <&vreg_l11c_3p3>;
+
+		max-speed = <3200000>;
+	};
+};
+
+/* ============================================================================
+ * [crux 2026-10-11]④ PMIC 温度通道 + adc-tm（阈值中断温控）
+ * 通道号抄自厂商 DTB：
+ *   pm8150 : 0x4c xo_therm / 0x4d quiet_therm / 0x4e pa_therm0
+ *   pm8150b: 0x4d
+ *   pm8150l: 0x4d cam_therm0 / 0x4e cam_therm1 / 0x4f pa_therm1
+ * ============================================================================ */
+&pm8150_adc {
+	channel@4c {
+		reg = <ADC5_XO_THERM_100K_PU>;
+		qcom,ratiometric;
+		qcom,hw-settle-time = <200>;
+		label = "xo_therm";
+	};
+
+	channel@4d {
+		reg = <ADC5_AMUX_THM1_100K_PU>;
+		qcom,ratiometric;
+		qcom,hw-settle-time = <200>;
+		label = "quiet_therm";
+	};
+
+	channel@4e {
+		reg = <ADC5_AMUX_THM2_100K_PU>;
+		qcom,ratiometric;
+		qcom,hw-settle-time = <200>;
+		label = "pa_therm0";
+	};
+};
+
+&pm8150b_adc {
+	channel@4d {
+		reg = <ADC5_AMUX_THM1_100K_PU>;
+		qcom,ratiometric;
+		qcom,hw-settle-time = <200>;
+		label = "smb_therm";
+	};
+};
+
+&pm8150l_adc {
+	channel@4d {
+		reg = <ADC5_AMUX_THM1_100K_PU>;
+		qcom,ratiometric;
+		qcom,hw-settle-time = <200>;
+		label = "cam_therm0";
+	};
+
+	channel@4e {
+		reg = <ADC5_AMUX_THM2_100K_PU>;
+		qcom,ratiometric;
+		qcom,hw-settle-time = <200>;
+		label = "cam_therm1";
+	};
+
+	channel@4f {
+		reg = <ADC5_AMUX_THM3_100K_PU>;
+		qcom,ratiometric;
+		qcom,hw-settle-time = <200>;
+		label = "pa_therm1";
+	};
+};
+
+&pm8150_adc_tm {
+	status = "okay";
+
+	xo-therm@0 {
+		reg = <0>;
+		io-channels = <&pm8150_adc ADC5_XO_THERM_100K_PU>;
+		qcom,ratiometric;
+		qcom,hw-settle-time-us = <200>;
+	};
+
+	quiet-therm@1 {
+		reg = <1>;
+		io-channels = <&pm8150_adc ADC5_AMUX_THM1_100K_PU>;
+		qcom,ratiometric;
+		qcom,hw-settle-time-us = <200>;
+	};
+
+	pa-therm0@2 {
+		reg = <2>;
+		io-channels = <&pm8150_adc ADC5_AMUX_THM2_100K_PU>;
+		qcom,ratiometric;
+		qcom,hw-settle-time-us = <200>;
+	};
+};
+
+&pm8150b_adc_tm {
+	status = "okay";
+
+	smb-therm@0 {
+		reg = <0>;
+		io-channels = <&pm8150b_adc ADC5_AMUX_THM1_100K_PU>;
+		qcom,ratiometric;
+		qcom,hw-settle-time-us = <200>;
+	};
+};
+
+&pm8150l_adc_tm {
+	status = "okay";
+
+	cam-therm0@0 {
+		reg = <0>;
+		io-channels = <&pm8150l_adc ADC5_AMUX_THM1_100K_PU>;
+		qcom,ratiometric;
+		qcom,hw-settle-time-us = <200>;
+	};
+
+	cam-therm1@1 {
+		reg = <1>;
+		io-channels = <&pm8150l_adc ADC5_AMUX_THM2_100K_PU>;
+		qcom,ratiometric;
+		qcom,hw-settle-time-us = <200>;
+	};
+
+	pa-therm1@2 {
+		reg = <2>;
+		io-channels = <&pm8150l_adc ADC5_AMUX_THM3_100K_PU>;
+		qcom,ratiometric;
+		qcom,hw-settle-time-us = <200>;
+	};
+};
+
+&thermal_zones {
+	xo-thermal {
+		polling-delay-passive = <0>;
+		polling-delay = <0>;
+		thermal-sensors = <&pm8150_adc_tm 0>;
+
+		trips {
+			xo_alert0: xo-alert0 {
+				temperature = <45000>;
+				hysteresis = <2000>;
+				type = "passive";
+			};
+		};
+	};
+
+	quiet-thermal {
+		polling-delay-passive = <0>;
+		polling-delay = <0>;
+		thermal-sensors = <&pm8150_adc_tm 1>;
+
+		trips {
+			quiet_alert0: quiet-alert0 {
+				temperature = <45000>;
+				hysteresis = <2000>;
+				type = "passive";
+			};
+		};
+	};
+
+	pa-thermal0 {
+		polling-delay-passive = <0>;
+		polling-delay = <0>;
+		thermal-sensors = <&pm8150_adc_tm 2>;
+
+		trips {
+			pa0_alert0: pa0-alert0 {
+				temperature = <45000>;
+				hysteresis = <2000>;
+				type = "passive";
+			};
+		};
+	};
+
+	smb-thermal {
+		polling-delay-passive = <0>;
+		polling-delay = <0>;
+		thermal-sensors = <&pm8150b_adc_tm 0>;
+
+		trips {
+			smb_alert0: smb-alert0 {
+				temperature = <45000>;
+				hysteresis = <2000>;
+				type = "passive";
+			};
+		};
+	};
+
+	cam-thermal0 {
+		polling-delay-passive = <0>;
+		polling-delay = <0>;
+		thermal-sensors = <&pm8150l_adc_tm 0>;
+
+		trips {
+			cam0_alert0: cam0-alert0 {
+				temperature = <45000>;
+				hysteresis = <2000>;
+				type = "passive";
+			};
+		};
+	};
+
+	cam-thermal1 {
+		polling-delay-passive = <0>;
+		polling-delay = <0>;
+		thermal-sensors = <&pm8150l_adc_tm 1>;
+
+		trips {
+			cam1_alert0: cam1-alert0 {
+				temperature = <45000>;
+				hysteresis = <2000>;
+				type = "passive";
+			};
+		};
+	};
+
+	pa-thermal1 {
+		polling-delay-passive = <0>;
+		polling-delay = <0>;
+		thermal-sensors = <&pm8150l_adc_tm 2>;
+
+		trips {
+			pa1_alert0: pa1-alert0 {
+				temperature = <45000>;
+				hysteresis = <2000>;
+				type = "passive";
+			};
+		};
+	};
 };
