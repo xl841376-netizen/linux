@@ -1,0 +1,268 @@
+#include <dt-bindings/clock/qcom,npucc-sm8150.h>
+/* 我们自己建的（原厂没有对应节点 / 我们自己的本地调节器与辅助节点） */
+
+&soc {
+	touch_vddio_vreg: touch_vddio_vreg {
+		compatible = "regulator-fixed";
+		regulator-name = "disp_vddio_vreg";
+		startup-delay-us = <4000>;
+		enable-active-high;
+		regulator-boot-on;
+		gpio = <&tlmm 31 0>;
+	 };
+	vdd_boost_vreg: vdd_boost_vreg {
+		compatible = "regulator-fixed";
+		regulator-name = "vdd_boost_vreg";
+		startup-delay-us = <4000>;
+		enable-active-high;
+		regulator-always-on;
+		gpio = <&pm8150b_gpios 5 0>;
+	 };
+	dsi_amoled_panel_pwr_external_supply: dsi_amoled_panel_pwr_external_supply {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		qcom,panel-supply-entry@0 {
+			reg = <0>;
+			qcom,supply-name = "vddio";
+			qcom,supply-min-voltage = <1800000>;
+			qcom,supply-max-voltage = <1800000>;
+			qcom,supply-enable-load = <62000>;
+			qcom,supply-disable-load = <80>;
+		};
+
+		qcom,panel-supply-entry@1 {
+			reg = <1>;
+			qcom,supply-name = "vcie";
+			qcom,supply-min-voltage = <3000000>;
+			qcom,supply-max-voltage = <3000000>;
+			qcom,supply-enable-load = <62000>;
+			qcom,supply-disable-load = <80>;
+			qcom,supply-post-on-sleep = <10>;
+			qcom,supply-pre-off-sleep = <10>;
+		};
+	};
+	fingerprint_goodix {
+		compatible = "goodix,fingerprint";
+		goodix,gpio-reset = <&tlmm 37 0x0>;
+		goodix,gpio-irq = <&tlmm 120 0x0>;
+		status = "ok";
+	};
+	fp_vdd_vreg: fp_vdd_vreg {
+		compatible = "regulator-fixed";
+		regulator-name = "fp_vdd_vreg";
+		startup-delay-us = <4000>;
+		enable-active-high;
+		gpio = <&tlmm 125 0>;
+		regulator-always-on;
+	};
+	fingerprint_fpc {
+		status = "ok";
+		compatible = "fpc,fpc1020";
+		interrupt-parent = <&tlmm>;
+		interrupts = <118 0x0>;
+		fpc,gpio_irq = <&tlmm 118 0x0>;
+		pinctrl-names = "fpc1020_reset_reset",
+			"fpc1020_reset_active";
+		pinctrl-0 = <&msm_gpio_119>;
+		pinctrl-1 = <&msm_gpio_119_output_high>;
+	};
+	thermal_message: thermal-message {
+		board-sensor = "VIRTUAL-SENSOR";
+	};
+	touch_vddio_vreg: touch_vddio_vreg {
+		compatible = "regulator-fixed";
+		regulator-name = "disp_vddio_vreg";
+		startup-delay-us = <4000>;
+		enable-active-high;
+		regulator-boot-on;
+		gpio = <&tlmm 31 0>;
+	 };
+};
+
+&i2c4 {
+	fsa4480@42 {
+		status = "disabled";
+	};
+};
+
+/ {
+	cs35l41_vreg: regulator-cs35l41 {
+		compatible = "regulator-fixed";
+		regulator-name = "cs35l41_vreg";
+		regulator-min-microvolt = <1800000>;
+		regulator-max-microvolt = <1800000>;
+		regulator-always-on;
+	};
+};
+
+
+/* ==== NPU (Hexagon HTA) boot node - added for PAS/IOMMU experiment ==== */
+&soc {
+	npu_boot: npu-boot@9800000 {
+		compatible = "qcom,npu-boot";
+		reg = <0x0 0x09800000 0x0 0x800000>;
+		qcom,pas-id = <23>;
+		qcom,firmware-name = "npu";
+		memory-region = <&npu_mem>;
+		power-domains = <&rpmhpd SM8150_CX>,
+				<&rpmhpd SM8150_MX>;
+		power-domain-names = "cx", "mx";
+		/* 真机值（工厂 DT 实测）：<&apps_smmu 0x1081 0x400> */
+		iommus = <&apps_smmu 0x1081 0x400>;
+
+		clocks = <&npu_dummy_clk>,
+			 <&npu_dummy_clk>,
+			 <&npu_dummy_clk>,
+			 <&npucc NPU_CC_ARMWIC_CORE_CLK>,
+			 <&npucc NPU_CC_CAL_DP_CLK>,
+			 <&npucc NPU_CC_CAL_DP_CDC_CLK>,
+			 <&npucc NPU_CC_CONF_NOC_AHB_CLK>,
+			 <&npucc NPU_CC_COMP_NOC_AXI_CLK>,
+			 <&npucc NPU_CC_NPU_CORE_CLK>,
+			 <&npucc NPU_CC_NPU_CORE_CTI_CLK>,
+			 <&npucc NPU_CC_NPU_CORE_APB_CLK>,
+			 <&npucc NPU_CC_NPU_CORE_ATB_CLK>,
+			 <&npucc NPU_CC_NPU_CPC_CLK>,
+			 <&npucc NPU_CC_NPU_CPC_TIMER_CLK>,
+			 <&npucc NPU_CC_QTIMER_CORE_CLK>,
+			 <&npucc NPU_CC_SLEEP_CLK>,
+			 <&npucc NPU_CC_BWMON_CLK>,
+			 <&npucc NPU_CC_PERF_CNT_CLK>,
+			 <&npucc NPU_CC_BTO_CORE_CLK>,
+			 <&npucc NPU_CC_XO_CLK>;
+		clock-names = "qdss_clk",
+			       "at_clk",
+			       "trig_clk",
+			       "armwic_core_clk",
+			       "cal_dp_clk",
+			       "cal_dp_cdc_clk",
+			       "conf_noc_ahb_clk",
+			       "comp_noc_axi_clk",
+			       "npu_core_clk",
+			       "npu_core_cti_clk",
+			       "npu_core_apb_clk",
+			       "npu_core_atb_clk",
+			       "npu_cpc_clk",
+			       "npu_cpc_timer_clk",
+			       "qtimer_core_clk",
+			       "sleep_clk",
+			       "bwmon_clk",
+			       "perf_cnt_clk",
+			       "bto_core_clk",
+			       "xo_clk";
+
+		status = "ok";
+	};
+};
+
+/* ==== NPU QMP mailbox：观测 NPU 固件启动后的 QMP 握手 ====
+ * 值取自真机工厂 DT（crux.dts）：qmp-npu-low/high@9818000，
+ * GIC SPI 369/370，irq-mask 0x12/0x14，desc offset 0x0/0x2000。
+ */
+&soc {
+	qmp_npu0: qmp-npu-low@9818000 {
+		compatible = "qcom,qmp-mbox";
+		reg = <0x0 0x09818000 0x0 0x8000>,
+		      <0x0 0x09901008 0x0 0x4>;
+		reg-names = "msgram", "irq-reg-base";
+		qcom,irq-mask = <0x12>;
+		interrupts = <GIC_SPI 369 IRQ_TYPE_EDGE_RISING>;
+		label = "npu_qmp_low";
+		priority = <0>;
+		mbox-desc-offset = <0x0>;
+		#mbox-cells = <1>;
+		status = "ok";
+	};
+
+	qmp_npu1: qmp-npu-high@9818000 {
+		compatible = "qcom,qmp-mbox";
+		reg = <0x0 0x09818000 0x0 0x8000>,
+		      <0x0 0x09901008 0x0 0x4>;
+		reg-names = "msgram", "irq-reg-base";
+		qcom,irq-mask = <0x14>;
+		interrupts = <GIC_SPI 370 IRQ_TYPE_EDGE_RISING>;
+		label = "npu_qmp_high";
+		priority = <1>;
+		mbox-desc-offset = <0x2000>;
+		#mbox-cells = <1>;
+		status = "ok";
+	};
+};
+
+/* ==== msm_npu 驱动节点（真机值抄自 crux.dts qcom,msm_npu@9800000）====
+ * 注意：reg-names 的顺序在真机上是 tcm/core/bwmon（tcm 在 0x9800000）；
+ * 时钟/稳压器先不给——NPU 由 npu_boot24 已完成上电，驱动侧做了容错。
+ */
+&soc {
+	msm_npu: qcom,msm-npu@9800000 {
+		compatible = "qcom,msm-npu";
+		status = "ok";
+		reg = <0x0 0x09800000 0x0 0x40000>,
+		      <0x0 0x09900000 0x0 0x10000>,
+		      <0x0 0x09960200 0x0 0x600>;
+		reg-names = "tcm", "core", "bwmon";
+		interrupts = <GIC_SPI 364 IRQ_TYPE_EDGE_RISING>,
+			     <GIC_SPI 366 IRQ_TYPE_EDGE_RISING>,
+			     <GIC_SPI 368 IRQ_TYPE_LEVEL_HIGH>;
+		interrupt-names = "error_irq", "wdg_bite_irq", "ipc_irq";
+		iommus = <&apps_smmu 0x1081 0x400>;
+
+		qcom,npu-pwrlevels {
+			#address-cells = <1>;
+			#size-cells = <0>;
+			compatible = "qcom,npu-pwrlevels";
+			initial-pwrlevel = <5>;
+
+			qcom,npu-pwrlevel@0 {
+				reg = <0>;
+				vreg = <1>;
+				clk-freq = <0x0 0x0 0x0 0x5f5e100 0x11e1a300 0x11e1a300 0x124f800 0x8f0d180 0x5f5e100 0x23c3460 0x124f800 0x3938700 0x5f5e100 0x124f800 0x124f800 0x0 0x124f800 0x11e1a300 0x124f800 0x124f800>;
+			};
+			qcom,npu-pwrlevel@1 {
+				reg = <1>;
+				vreg = <2>;
+				clk-freq = <0x0 0x0 0x0 0x8f0d180 0x17d78400 0x17d78400 0x23c3460 0xbebc200 0x8f0d180 0x47868c0 0x124f800 0x7270e00 0x8f0d180 0x124f800 0x124f800 0x0 0x124f800 0x17d78400 0x124f800 0x124f800>;
+			};
+			qcom,npu-pwrlevel@2 {
+				reg = <2>;
+				vreg = <3>;
+				clk-freq = <0x0 0x0 0x0 0xbebc200 0x1d0707c0 0x1d0707c0 0x23c3460 0x11e1a300 0xbebc200 0x8f0d180 0x124f800 0xe4e1c00 0xbebc200 0x124f800 0x124f800 0x0 0x124f800 0x1d0707c0 0x124f800 0x124f800>;
+			};
+			qcom,npu-pwrlevel@3 {
+				reg = <3>;
+				vreg = <4>;
+				clk-freq = <0x0 0x0 0x0 0x11e1a300 0x26dcbb00 0x26dcbb00 0x47868c0 0x18054ac0 0x11e1a300 0x8f0d180 0x124f800 0xe4e1c00 0x11e1a300 0x124f800 0x124f800 0x0 0x124f800 0x26dcbb00 0x124f800 0x124f800>;
+			};
+			qcom,npu-pwrlevel@4 {
+				reg = <4>;
+				vreg = <6>;
+				clk-freq = <0x0 0x0 0x0 0x17d78400 0x3056e0c0 0x3056e0c0 0x47868c0 0x1fc4ef40 0x17d78400 0x8f0d180 0x124f800 0x11e1a300 0x17d78400 0x124f800 0x124f800 0x0 0x124f800 0x3056e0c0 0x124f800 0x124f800>;
+			};
+			qcom,npu-pwrlevel@5 {
+				reg = <5>;
+				vreg = <7>;
+				clk-freq = <0x0 0x0 0x0 0x17d78400 0x361efb00 0x361efb00 0x47868c0 0x1fc4ef40 0x17d78400 0x8f0d180 0x124f800 0x11e1a300 0x17d78400 0x124f800 0x124f800 0x0 0x124f800 0x361efb00 0x124f800 0x124f800>;
+			};
+		};
+	};
+};
+
+
+/* ==== NPUCC 时钟控制器（真机值：qcom,npucc-sm8150-v2 @0x9910000）==== */
+&soc {
+	npu_dummy_clk: npu-dummy-clk {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <19200000>;
+	};
+
+	npucc: qcom,npucc@9910000 {
+		compatible = "qcom,npucc-sm8150-v2";
+		reg = <0x0 0x09910000 0x0 0x10000>;
+		reg-names = "cc_base";
+		#clock-cells = <1>;
+		#reset-cells = <1>;
+		status = "ok";
+	};
+};

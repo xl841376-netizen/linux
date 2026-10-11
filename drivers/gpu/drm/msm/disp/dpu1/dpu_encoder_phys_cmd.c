@@ -39,6 +39,7 @@
 #define DEFAULT_TEARCHECK_SYNC_THRESH_START	4
 #define DEFAULT_TEARCHECK_SYNC_THRESH_CONTINUE	4
 
+
 static void dpu_encoder_phys_cmd_enable_te(struct dpu_encoder_phys *phys_enc);
 
 static bool dpu_encoder_phys_cmd_is_master(struct dpu_encoder_phys *phys_enc)

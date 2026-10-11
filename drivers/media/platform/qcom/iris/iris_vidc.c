@@ -89,6 +89,22 @@ static void iris_m2m_job_abort(void *priv)
 	v4l2_m2m_job_finish(inst->m2m_dev, m2m_ctx);
 }
 
+static __poll_t iris_poll(struct file *file, struct poll_table_struct *wait)
+{
+	struct iris_inst *inst = iris_get_inst(file);
+	__poll_t ret;
+
+	ret = v4l2_m2m_fop_poll(file, wait);
+	if (inst->domain == DECODER && (ret & EPOLLERR) &&
+	    READ_ONCE(inst->state) != IRIS_INST_ERROR &&
+	    ((ret & EPOLLPRI) ||
+	     (READ_ONCE(inst->state) == IRIS_INST_INPUT_STREAMING &&
+	      !(READ_ONCE(inst->sub_state) & IRIS_INST_SUB_FIRST_IPSC))))
+		ret &= ~EPOLLERR;
+
+	return ret;
+}
+
 static const struct v4l2_m2m_ops iris_m2m_ops = {
 	.device_run = iris_m2m_device_run,
 	.job_abort = iris_m2m_job_abort,
@@ -299,6 +315,7 @@ int iris_close(struct file *filp)
 	iris_destroy_all_internal_buffers(inst, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE);
 	iris_check_num_queued_internal_buffers(inst, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE);
 	iris_check_num_queued_internal_buffers(inst, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE);
+	iris_vb2_vp9_release_high_iova_hole(inst);
 	iris_remove_session(inst);
 	mutex_unlock(&inst->lock);
 	mutex_destroy(&inst->ctx_q_lock);
@@ -646,7 +663,7 @@ static const struct v4l2_file_operations iris_v4l2_file_ops = {
 	.open                           = iris_open,
 	.release                        = iris_close,
 	.unlocked_ioctl                 = video_ioctl2,
-	.poll                           = v4l2_m2m_fop_poll,
+	.poll                           = iris_poll,
 	.mmap                           = v4l2_m2m_fop_mmap,
 };
 

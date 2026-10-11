@@ -111,16 +111,43 @@ enum qcom_scm_qseecom_tz_owner {
 enum qcom_scm_qseecom_tz_svc {
 	QSEECOM_TZ_SVC_APP_ID_PLACEHOLDER	= 0,
 	QSEECOM_TZ_SVC_APP_MGR			= 1,
+	QSEECOM_TZ_SVC_LISTENER			= 2,
+	/* TZ-internal RPMB service (backs listener 0x2000) */
+	QSEECOM_TZ_SVC_RPMB			= 4,
+	QSEECOM_TZ_SVC_KEYSTORE			= 5,
 	QSEECOM_TZ_SVC_INFO			= 6,
 };
 
 enum qcom_scm_qseecom_tz_cmd_app {
 	QSEECOM_TZ_CMD_APP_SEND			= 1,
+	QSEECOM_TZ_CMD_APP_SHUTDOWN	= 2,
 	QSEECOM_TZ_CMD_APP_LOOKUP		= 3,
+	/*
+	 * The following commands live in the owner=QSEE_OS(50) /
+	 * svc=APP_MGR(1) namespace (same as APP_LOOKUP above), unlike
+	 * APP_SEND which targets a specific app (owner=TZ_APPS).
+	 */
+	QSEECOM_TZ_CMD_APP_START		= 1,
+	QSEECOM_TZ_CMD_LOAD_SERVICES_IMAGE	= 7,
+};
+
+enum qcom_scm_qseecom_tz_cmd_listener {
+	QSEECOM_TZ_CMD_LISTENER_REGISTER	= 1,
+	QSEECOM_TZ_CMD_LISTENER_DEREGISTER	= 2,
+	QSEECOM_TZ_CMD_LISTENER_RESPONSE	= 3,
+	QSEECOM_TZ_CMD_LISTENER_REGISTER_SMCINVOKE = 6,
 };
 
 enum qcom_scm_qseecom_tz_cmd_info {
 	QSEECOM_TZ_CMD_INFO_VERSION		= 3,
+};
+
+enum qcom_scm_qseecom_tz_cmd_rpmb {
+	QSEECOM_TZ_CMD_RPMB_CHECK_PROV_STATUS	= 3,
+};
+
+enum qcom_scm_qseecom_tz_cmd_keystore {
+	QSEECOM_TZ_CMD_KS_GET_MAX_KEYS		= 3,
 };
 
 #define RSCTABLE_BUFFER_NOT_SUFFICIENT		20
@@ -912,18 +939,24 @@ static int __qcom_scm_pas_auth_and_reset(struct device *dev, u32 pas_id)
 	struct qcom_scm_res res;
 
 	ret = qcom_scm_clk_enable();
+	pr_info("qcom_scm[AUTH] clk_enable=%d\n", ret);
 	if (ret)
 		return ret;
 
 	ret = qcom_scm_bw_enable();
+	pr_info("qcom_scm[AUTH] bw_enable=%d\n", ret);
 	if (ret)
 		goto disable_clk;
 
 	ret = qcom_scm_call(dev, &desc, &res);
+	pr_info("qcom_scm[AUTH] call=%d tz=%lld\n", ret, (long long)res.result[0]);
 	qcom_scm_bw_disable();
 
 disable_clk:
 	qcom_scm_clk_disable();
+
+	pr_info("qcom_scm[PAS_AUTH_AND_RESET]: pas_id=%u call_ret=%d tz_ret=%lld\n",
+		pas_id, ret, (long long)res.result[0]);
 
 	return ret ? : res.result[0];
 }
@@ -945,7 +978,12 @@ static int __qcom_scm_pas_prepare_and_auth_reset(struct device *dev,
 	 * auth_and_reset call and create an shmbridge on the remote subsystem
 	 * memory region and then invokes a call to TrustZone to authenticate.
 	 */
-	if (!ctx->use_tzmem)
+	/*
+	 * [crux] Only take the SHM Bridge path when the secure world actually
+	 * enabled SHM Bridge. Otherwise fall back to the legacy
+	 * auth_and_reset call, which is what EL1 platforms have always used.
+	 */
+	if (!ctx->use_tzmem || !qcom_tzmem_shm_bridge_available())
 		return __qcom_scm_pas_auth_and_reset(dev, ctx->pas_id);
 
 	/*
@@ -2118,6 +2156,163 @@ static int __qcom_scm_qseecom_call(const struct qcom_scm_desc *desc,
  *
  * Return: Zero on success, nonzero on failure.
  */
+/* Registered listener services, protected by qcom_scm_qseecom_call_lock. */
+static LIST_HEAD(qcom_scm_qseecom_listeners);
+
+/*
+ * An app that keeps asking for service without ever making progress would
+ * otherwise spin here forever with the call lock held. The real bound is set
+ * by the app; this only stops a broken one from taking the machine with it.
+ */
+#define QSEECOM_MAX_LISTENER_ROUNDS		256
+
+static struct qcom_scm_qseecom_listener *qcom_scm_qseecom_listener_find(u32 id)
+{
+	struct qcom_scm_qseecom_listener *listener;
+
+	lockdep_assert_held(&qcom_scm_qseecom_call_lock);
+
+	list_for_each_entry(listener, &qcom_scm_qseecom_listeners, node) {
+		if (listener->id == id)
+			return listener;
+	}
+
+	return NULL;
+}
+
+/*
+ * Tell TZ that a listener request has been dealt with. The response is what
+ * resumes the app, so this returns the outcome of the command that was
+ * interrupted -- which may itself be another listener request.
+ */
+static int qcom_scm_qseecom_listener_respond(u32 id, u32 status,
+					     struct qcom_scm_qseecom_resp *res)
+{
+	struct qcom_scm_desc desc = {};
+
+	lockdep_assert_held(&qcom_scm_qseecom_call_lock);
+
+	desc.owner = QSEECOM_TZ_OWNER_QSEE_OS;
+	desc.svc = QSEECOM_TZ_SVC_LISTENER;
+	desc.cmd = QSEECOM_TZ_CMD_LISTENER_RESPONSE;
+	desc.arginfo = QCOM_SCM_ARGS(2, QCOM_SCM_VAL, QCOM_SCM_VAL);
+	desc.args[0] = id;
+	desc.args[1] = status;
+
+	return __qcom_scm_qseecom_call(&desc, res);
+}
+
+/*
+ * Service listener requests until the interrupted command finally completes.
+ *
+ * A QSEE app that needs something from the normal world -- reading or writing
+ * its secure storage, overwhelmingly -- does not return; the SCM call comes
+ * back as QSEECOM_RESULT_INCOMPLETE naming the listener it wants, and stays
+ * that way until we answer. Answering is what resumes it.
+ *
+ * Not answering is not a neutral option. TZ waits, every later QSEECOM call
+ * returns -EBUSY, and the device generally has to be power cycled. So an
+ * unknown listener id is still answered, with a failure, which the app can at
+ * least handle.
+ */
+static int qcom_scm_qseecom_service_listeners(struct qcom_scm_qseecom_resp *res)
+{
+	struct qcom_scm_qseecom_listener *listener;
+	unsigned int rounds = 0;
+	u32 status;
+	u32 id;
+	int ret;
+
+	lockdep_assert_held(&qcom_scm_qseecom_call_lock);
+
+	while (res->result == QSEECOM_RESULT_INCOMPLETE) {
+		if (res->resp_type != QSEECOM_SCM_RES_QSEOS_LISTENER_ID) {
+			/*
+			 * No listener id to answer with, so the application
+			 * stays parked in TZ and every later QSEECOM call
+			 * returns -EBUSY until the device is power cycled.
+			 * Nothing here can recover it; say so plainly rather
+			 * than leaving the next person to work out why the
+			 * interface went dead.
+			 */
+			dev_err(__scm->dev,
+				"qseecom: incomplete call with unexpected response type %llx; the interface is now stuck until reboot\n",
+				res->resp_type);
+			return -EPROTO;
+		}
+
+		if (res->data > U32_MAX) {
+			/*
+			 * A listener id that does not fit one. There is
+			 * nothing to answer -- responding needs a valid id --
+			 * so the application stays parked and the interface is
+			 * stuck until reboot, same as the case above.
+			 */
+			dev_err(__scm->dev,
+				"qseecom: listener id %llx out of range; the interface is now stuck until reboot\n",
+				res->data);
+			return -EPROTO;
+		}
+
+		id = res->data;
+
+		if (++rounds > QSEECOM_MAX_LISTENER_ROUNDS) {
+			/*
+			 * Answer failure before giving up. The application is
+			 * parked in TZ waiting for this listener, and leaving
+			 * it there makes every later QSEECOM call return
+			 * -EBUSY until the device is power cycled -- so tell
+			 * it the request failed and let it error out instead.
+			 */
+			dev_err(__scm->dev,
+				"qseecom: listener %u will not settle, failing it\n",
+				id);
+			ret = qcom_scm_qseecom_listener_respond(id,
+					QSEECOM_LISTENER_FAILURE, res);
+			if (ret)
+				dev_err(__scm->dev,
+					"qseecom: could not fail listener %u (%d); the application stays parked and the interface is stuck until reboot\n",
+					id, ret);
+			return -ELOOP;
+		}
+
+		listener = qcom_scm_qseecom_listener_find(id);
+		if (listener) {
+			status = listener->service(listener);
+		} else {
+			dev_warn_once(__scm->dev,
+				      "qseecom: no listener %u registered, failing the request\n",
+				      id);
+			status = QSEECOM_LISTENER_FAILURE;
+		}
+
+		ret = qcom_scm_qseecom_listener_respond(id, status, res);
+		if (ret) {
+			dev_err(__scm->dev,
+				"qseecom: failed to answer listener %u: %d\n",
+				id, ret);
+			return ret;
+		}
+	}
+
+	/*
+	 * A blocked call is a different problem: the app is waiting on a
+	 * listener that is already busy elsewhere, and unblocking it needs
+	 * TZ_OS_CONTINUE_BLOCKED_REQUEST. Nothing here generates that yet.
+	 *
+	 * Reported the same way as before this function existed: not a kernel
+	 * bug, so no backtrace, and rate-limited because a caller that hits it
+	 * will keep hitting it.
+	 */
+	if (res->result == QSEECOM_RESULT_BLOCKED_ON_LISTENER) {
+		dev_warn_ratelimited(__scm->dev,
+				     "qseecom: blocked on a busy listener\n");
+		return -EBUSY;
+	}
+
+	return 0;
+}
+
 static int qcom_scm_qseecom_call(const struct qcom_scm_desc *desc,
 				 struct qcom_scm_qseecom_resp *res)
 {
@@ -2125,12 +2320,16 @@ static int qcom_scm_qseecom_call(const struct qcom_scm_desc *desc,
 
 	/*
 	 * Note: Multiple QSEECOM SCM calls should not be executed same time,
-	 * so lock things here. This needs to be extended to callback/listener
-	 * handling when support for that is implemented.
+	 * so lock things here. The lock is held across listener servicing too:
+	 * from TZ's point of view the request and our answer are one
+	 * conversation, and letting another call in partway through would
+	 * interleave two of them.
 	 */
 
 	mutex_lock(&qcom_scm_qseecom_call_lock);
 	status = __qcom_scm_qseecom_call(desc, res);
+	if (!status)
+		status = qcom_scm_qseecom_service_listeners(res);
 	mutex_unlock(&qcom_scm_qseecom_call_lock);
 
 	dev_dbg(__scm->dev, "%s: owner=%x, svc=%x, cmd=%x, result=%lld, type=%llx, data=%llx\n",
@@ -2141,17 +2340,6 @@ static int qcom_scm_qseecom_call(const struct qcom_scm_desc *desc,
 		dev_err(__scm->dev, "qseecom: scm call failed with error %d\n", status);
 		return status;
 	}
-
-	/*
-	 * TODO: Handle incomplete and blocked calls:
-	 *
-	 * Incomplete and blocked calls are not supported yet. Some devices
-	 * and/or commands require those, some don't. Let's warn about them
-	 * prominently in case someone attempts to try these commands with a
-	 * device/command combination that isn't supported yet.
-	 */
-	WARN_ON(res->result == QSEECOM_RESULT_INCOMPLETE);
-	WARN_ON(res->result == QSEECOM_RESULT_BLOCKED_ON_LISTENER);
 
 	return 0;
 }
@@ -2242,6 +2430,523 @@ int qcom_scm_qseecom_app_get_id(const char *app_name, u32 *app_id)
 	return 0;
 }
 EXPORT_SYMBOL_GPL(qcom_scm_qseecom_app_get_id);
+
+/**
+ * qcom_scm_qseecom_app_load() - Load a QSEE application image into the TEE.
+ * @img:     Concatenated .mdt + .b0x image.
+ * @mdt_len: Size of the .mdt (header) part.
+ * @img_len: Total size of the image.
+ *
+ * Return: application id on success, negative error code on failure.
+ */
+int qcom_scm_qseecom_app_load(void *img, size_t mdt_len, size_t img_len,
+			      u32 *app_id)
+{
+	phys_addr_t img_phys;
+	struct qcom_scm_qseecom_resp res = {};
+	struct qcom_scm_desc desc = {};
+	int status;
+
+	if (!img || !mdt_len || mdt_len > img_len)
+		return -EINVAL;
+
+	desc.owner = QSEECOM_TZ_OWNER_QSEE_OS;
+	desc.svc = QSEECOM_TZ_SVC_APP_MGR;
+	desc.cmd = QSEECOM_TZ_CMD_APP_START;
+	/*
+	 * All three arguments are plain values: unlike the lookup command,
+	 * which passes a buffer holding the name, the image address is handed
+	 * over as a bare physical address rather than as a buffer descriptor.
+	 */
+	desc.arginfo = QCOM_SCM_ARGS(3);
+	desc.args[0] = mdt_len;
+	desc.args[1] = img_len;
+	img_phys = qcom_tzmem_to_phys(img);
+	if (!img_phys)
+		return -EINVAL;
+
+	desc.args[2] = img_phys;
+
+	status = qcom_scm_qseecom_call(&desc, &res);
+	if (status)
+		return status;
+
+	if (res.result != QSEECOM_RESULT_SUCCESS) {
+		dev_dbg(__scm->dev,
+			"qseecom: app load rejected: result %llu, type %llu, data %llu\n",
+			res.result, res.resp_type, res.data);
+		return -EIO;
+	}
+
+	if (res.resp_type != QSEECOM_SCM_RES_APP_ID)
+		return -EINVAL;
+
+	*app_id = res.data;
+
+	return 0;
+}
+
+EXPORT_SYMBOL_GPL(qcom_scm_qseecom_app_load);
+
+int qcom_scm_qseecom_app_shutdown(u32 app_id)
+{
+	struct qcom_scm_qseecom_resp res = {};
+	struct qcom_scm_desc desc = {};
+	int status;
+
+	desc.owner = QSEECOM_TZ_OWNER_QSEE_OS;
+	desc.svc = QSEECOM_TZ_SVC_APP_MGR;
+	desc.cmd = QSEECOM_TZ_CMD_APP_SHUTDOWN;
+	desc.arginfo = QCOM_SCM_ARGS(1);
+	desc.args[0] = app_id;
+
+	status = qcom_scm_qseecom_call(&desc, &res);
+	if (status)
+		return status;
+
+	if (res.result != QSEECOM_RESULT_SUCCESS)
+		return -EINVAL;
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(qcom_scm_qseecom_app_shutdown);
+
+/**
+ * qcom_scm_qseecom_services_load() - Load a shared services image (e.g. cmnlib)
+ * into the TEE.
+ * @img:     Concatenated .mdt + .b0x image.
+ * @mdt_len: Size of the .mdt (header) part.
+ * @img_len: Total size of the image.
+ *
+ * Return: zero on success, negative error code on failure.
+ */
+int qcom_scm_qseecom_services_load(const void *img, size_t mdt_len,
+				   size_t img_len)
+{
+	struct qcom_scm_desc desc = {};
+	struct qcom_scm_qseecom_resp res = {};
+	void *buf __free(qcom_tzmem) = NULL;
+	int status;
+
+	if (!img || !img_len || mdt_len > img_len)
+		return -EINVAL;
+
+	buf = qcom_tzmem_alloc(__scm->mempool, img_len, GFP_KERNEL);
+	if (!buf)
+		return -ENOMEM;
+
+	memcpy(buf, img, img_len);
+
+	desc.owner = QSEECOM_TZ_OWNER_QSEE_OS;
+	desc.svc = QSEECOM_TZ_SVC_APP_MGR;
+	desc.cmd = QSEECOM_TZ_CMD_LOAD_SERVICES_IMAGE;
+	desc.arginfo = QCOM_SCM_ARGS(3, QCOM_SCM_VAL, QCOM_SCM_VAL,
+				     QCOM_SCM_VAL);
+	desc.args[0] = mdt_len;
+	desc.args[1] = img_len;
+	desc.args[2] = qcom_tzmem_to_phys(buf);
+
+	status = qcom_scm_qseecom_call(&desc, &res);
+	if (status)
+		return status;
+
+	if (res.result != QSEECOM_RESULT_SUCCESS)
+		return -EINVAL;
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(qcom_scm_qseecom_services_load);
+
+/**
+ * qcom_scm_qseecom_listener_register() - Register a QSEECOM listener.
+ * @listener_id: Listener identifier (chosen by the caller).
+ * @sb_len:      Size of the shared buffer (TZ memory).
+ *
+ * Return: virtual address of the shared buffer, or NULL on failure.
+ */
+enum qsecom_sb_type {
+	QSEECOM_SB_TZMEM	= 0,
+	QSEECOM_SB_DMA	= 1,
+};
+
+void *qcom_scm_qseecom_listener_register_legacy_ex(u32 listener_id, size_t sb_len,
+					    u32 sb_type)
+{
+	struct qcom_scm_desc desc = {};
+	struct qcom_scm_qseecom_resp res = {};
+	dma_addr_t phys = 0;
+	void *sb;
+	int ret;
+
+	if (!sb_len)
+		return NULL;
+
+	if (sb_type == QSEECOM_SB_DMA) {
+		sb = dma_alloc_coherent(__scm->dev, sb_len, &phys, GFP_KERNEL);
+	} else {
+		sb = qcom_tzmem_alloc(__scm->mempool, sb_len, GFP_KERNEL);
+		if (sb)
+			phys = qcom_tzmem_to_phys(sb);
+	}
+	if (!sb)
+		return NULL;
+
+	pr_info("qseecom: listener %u sb type=%u len=%zu phys=%pad\n",
+		listener_id, sb_type, sb_len, &phys);
+
+	desc.owner = QSEECOM_TZ_OWNER_QSEE_OS;
+	desc.svc = QSEECOM_TZ_SVC_LISTENER;
+	desc.cmd = QSEECOM_TZ_CMD_LISTENER_REGISTER_SMCINVOKE;
+	desc.arginfo = QCOM_SCM_ARGS(3, QCOM_SCM_VAL, QCOM_SCM_RW,
+				     QCOM_SCM_VAL);
+	desc.args[0] = listener_id;
+	desc.args[1] = phys;
+	desc.args[2] = sb_len;
+
+	ret = qcom_scm_qseecom_call(&desc, &res);
+	if (ret || res.result) {
+		pr_info("qseecom: listener %u smcinvoke reg ret=%d result=%lld type=%llx data=%llx\n",
+			listener_id, ret, res.result, res.resp_type, res.data);
+		memset(&res, 0, sizeof(res));
+		desc.cmd = QSEECOM_TZ_CMD_LISTENER_REGISTER;
+		ret = qcom_scm_qseecom_call(&desc, &res);
+		pr_info("qseecom: listener %u legacy reg ret=%d result=%lld type=%llx data=%llx\n",
+			listener_id, ret, res.result, res.resp_type, res.data);
+	}
+
+	if (ret || res.result != QSEECOM_RESULT_SUCCESS) {
+		pr_err("qseecom: listener %u register failed (%d/%lld)\n",
+		       listener_id, ret, res.result);
+		if (sb_type == QSEECOM_SB_DMA)
+			dma_free_coherent(__scm->dev, sb_len, sb, phys);
+		else
+			qcom_tzmem_free(sb);
+		return NULL;
+	}
+
+	return sb;
+}
+EXPORT_SYMBOL_GPL(qcom_scm_qseecom_listener_register_legacy_ex);
+
+void *qcom_scm_qseecom_listener_register_legacy(u32 listener_id, size_t sb_len)
+{
+	struct qcom_scm_desc desc = {};
+	struct qcom_scm_qseecom_resp res = {};
+	void *sb;
+	int ret;
+
+	if (!sb_len)
+		return NULL;
+
+	sb = qcom_tzmem_alloc(__scm->mempool, sb_len, GFP_KERNEL);
+	if (!sb)
+		return NULL;
+
+	desc.owner = QSEECOM_TZ_OWNER_QSEE_OS;
+	desc.svc = QSEECOM_TZ_SVC_LISTENER;
+	desc.cmd = QSEECOM_TZ_CMD_LISTENER_REGISTER_SMCINVOKE;
+	desc.arginfo = QCOM_SCM_ARGS(3, QCOM_SCM_VAL, QCOM_SCM_RW,
+				     QCOM_SCM_VAL);
+	desc.args[0] = listener_id;
+	desc.args[1] = qcom_tzmem_to_phys(sb);
+	desc.args[2] = sb_len;
+
+	ret = qcom_scm_qseecom_call(&desc, &res);
+	if (ret || res.result) {
+		/*
+		 * SMCINVOKE not supported, or rejected by the TZ for this
+		 * listener id (e.g. -EINVAL on the SM8150 legacy TZ), fall
+		 * back to the legacy register command.
+		 */
+		pr_info("qseecom: listener %u smcinvoke reg ret=%d result=%lld type=%llx data=%llx\n",
+			listener_id, ret, res.result, res.resp_type, res.data);
+		memset(&res, 0, sizeof(res));
+		desc.cmd = QSEECOM_TZ_CMD_LISTENER_REGISTER;
+		ret = qcom_scm_qseecom_call(&desc, &res);
+		pr_info("qseecom: listener %u legacy reg ret=%d result=%lld type=%llx data=%llx\n",
+			listener_id, ret, res.result, res.resp_type, res.data);
+	} else {
+		pr_info("qseecom: listener %u smcinvoke reg OK (result=%lld)\n",
+			listener_id, res.result);
+	}
+
+	if (ret || res.result != QSEECOM_RESULT_SUCCESS) {
+		pr_err("qseecom: listener %u register failed (%d/%lld)\n",
+		       listener_id, ret, res.result);
+		qcom_tzmem_free(sb);
+		return NULL;
+	}
+
+	return sb;
+}
+EXPORT_SYMBOL_GPL(qcom_scm_qseecom_listener_register_legacy);
+
+int qcom_scm_qseecom_listener_register(struct qcom_scm_qseecom_listener *listener)
+{
+	struct qcom_scm_qseecom_resp res = {};
+	struct qcom_scm_desc desc = {};
+	phys_addr_t sb_phys;
+	int status;
+
+	if (!listener->service || !listener->sb || !listener->sb_len)
+		return -EINVAL;
+
+	sb_phys = qcom_tzmem_to_phys(listener->sb);
+	if (!sb_phys)
+		return -EINVAL;
+
+	desc.owner = QSEECOM_TZ_OWNER_QSEE_OS;
+	desc.svc = QSEECOM_TZ_SVC_LISTENER;
+	desc.cmd = QSEECOM_TZ_CMD_LISTENER_REGISTER;
+	desc.arginfo = QCOM_SCM_ARGS(3, QCOM_SCM_VAL, QCOM_SCM_RW,
+				     QCOM_SCM_VAL);
+	desc.args[0] = listener->id;
+	desc.args[1] = sb_phys;
+	desc.args[2] = listener->sb_len;
+
+	mutex_lock(&qcom_scm_qseecom_call_lock);
+
+	if (qcom_scm_qseecom_listener_find(listener->id)) {
+		mutex_unlock(&qcom_scm_qseecom_call_lock);
+		return -EBUSY;
+	}
+
+	status = __qcom_scm_qseecom_call(&desc, &res);
+	if (!status && res.result != QSEECOM_RESULT_SUCCESS)
+		status = -EIO;
+	if (!status)
+		list_add_tail(&listener->node, &qcom_scm_qseecom_listeners);
+
+	mutex_unlock(&qcom_scm_qseecom_call_lock);
+
+	if (status)
+		dev_err(__scm->dev, "qseecom: failed to register listener %u: %d\n",
+			listener->id, status);
+
+	return status;
+}
+EXPORT_SYMBOL_GPL(qcom_scm_qseecom_listener_register);
+
+/**
+ * qcom_scm_qseecom_listener_unregister() - Withdraw a listener service.
+ * @listener: The listener to unregister.
+ *
+ * The shared buffer may only be freed once this has returned successfully.
+ *
+ * Return: Zero on success, nonzero on failure.
+ */
+int qcom_scm_qseecom_listener_unregister(struct qcom_scm_qseecom_listener *listener)
+{
+	struct qcom_scm_qseecom_resp res = {};
+	struct qcom_scm_desc desc = {};
+	int status;
+
+	desc.owner = QSEECOM_TZ_OWNER_QSEE_OS;
+	desc.svc = QSEECOM_TZ_SVC_LISTENER;
+	desc.cmd = QSEECOM_TZ_CMD_LISTENER_DEREGISTER;
+	desc.arginfo = QCOM_SCM_ARGS(1, QCOM_SCM_VAL);
+	desc.args[0] = listener->id;
+
+	mutex_lock(&qcom_scm_qseecom_call_lock);
+
+	/*
+	 * Check before calling TZ, not after: on a listener that was never
+	 * registered, ->node is uninitialised, so a TZ call that happened to
+	 * succeed would hand list_del() garbage rather than simply doing
+	 * nothing.
+	 */
+	if (qcom_scm_qseecom_listener_find(listener->id) != listener) {
+		mutex_unlock(&qcom_scm_qseecom_call_lock);
+		return -ENOENT;
+	}
+
+	status = __qcom_scm_qseecom_call(&desc, &res);
+	if (!status && res.result != QSEECOM_RESULT_SUCCESS)
+		status = -EIO;
+	if (!status)
+		list_del(&listener->node);
+
+	mutex_unlock(&qcom_scm_qseecom_call_lock);
+
+	if (status)
+		dev_err(__scm->dev, "qseecom: failed to unregister listener %u: %d\n",
+			listener->id, status);
+
+	return status;
+}
+EXPORT_SYMBOL_GPL(qcom_scm_qseecom_listener_unregister);
+
+/**
+ * qcom_scm_qseecom_rpmb_check_prov_status() - Probe the TZ RPMB service.
+ * @status: optional output of the raw TZ response result.
+ *
+ * Read-only probe (no key provisioning, no erase).
+ *
+ * Return: 0 on success, negative errno on failure.
+ */
+int qcom_scm_qseecom_rpmb_check_prov_status(u64 *status)
+{
+	struct qcom_scm_desc desc = {};
+	struct qcom_scm_qseecom_resp res = {};
+	int ret;
+
+	desc.owner = QSEECOM_TZ_OWNER_QSEE_OS;
+	desc.svc = QSEECOM_TZ_SVC_RPMB;
+	desc.cmd = QSEECOM_TZ_CMD_RPMB_CHECK_PROV_STATUS;
+	desc.arginfo = 0;
+
+	ret = qcom_scm_qseecom_call(&desc, &res);
+
+	pr_info("qseecom: rpmb check_prov_status ret=%d result=%lld type=%llx data=%llx\n",
+		ret, res.result, res.resp_type, res.data);
+
+	if (status)
+		*status = res.result;
+
+	return ret;
+}
+EXPORT_SYMBOL_GPL(qcom_scm_qseecom_rpmb_check_prov_status);
+
+/**
+ * qcom_scm_qseecom_ks_get_max_keys() - Read-only TZ keystore capacity query.
+ * @max_keys: optional output of the raw TZ response.
+ *
+ * Uses TZ_OS_KS_GET_MAX_KEYS (0x32000503). No key is created or deleted.
+ */
+int qcom_scm_qseecom_ks_get_max_keys(u64 *max_keys)
+{
+	struct qcom_scm_desc desc = {};
+	struct qcom_scm_qseecom_resp res = {};
+	int ret;
+
+	desc.owner = QSEECOM_TZ_OWNER_QSEE_OS;
+	desc.svc = QSEECOM_TZ_SVC_KEYSTORE;
+	desc.cmd = QSEECOM_TZ_CMD_KS_GET_MAX_KEYS;
+	desc.arginfo = QCOM_SCM_ARGS(1, QCOM_SCM_VAL);
+	desc.args[0] = 0;
+
+	ret = qcom_scm_qseecom_call(&desc, &res);
+
+	pr_info("qseecom: ks_get_max_keys ret=%d result=%lld type=%llx data=%llx\n",
+		ret, res.result, res.resp_type, res.data);
+
+	if (max_keys)
+		*max_keys = res.result;
+
+	return ret;
+}
+EXPORT_SYMBOL_GPL(qcom_scm_qseecom_ks_get_max_keys);
+
+/**
+ * qcom_scm_qseecom_listener_deregister() - Deregister a QSEECOM listener.
+ * @listener_id: Listener identifier.
+ *
+ * Return: zero on success, negative error code on failure.
+ */
+int qcom_scm_qseecom_listener_deregister(u32 listener_id)
+{
+	struct qcom_scm_desc desc = {};
+	struct qcom_scm_qseecom_resp res = {};
+
+	desc.owner = QSEECOM_TZ_OWNER_QSEE_OS;
+	desc.svc = QSEECOM_TZ_SVC_LISTENER;
+	desc.cmd = QSEECOM_TZ_CMD_LISTENER_DEREGISTER;
+	desc.arginfo = QCOM_SCM_ARGS(1, QCOM_SCM_VAL);
+	desc.args[0] = listener_id;
+
+	if (qcom_scm_qseecom_call(&desc, &res))
+		return -EIO;
+
+	return res.result == QSEECOM_RESULT_SUCCESS ? 0 : -EINVAL;
+}
+EXPORT_SYMBOL_GPL(qcom_scm_qseecom_listener_deregister);
+
+/**
+ * qcom_scm_qseecom_listener_response() - Submit listener response to QTEE.
+ * @listener_id: Listener identifier.
+ * @status:      Response status.
+ *
+ * Return: zero on success, negative error code on failure.
+ */
+int qcom_scm_qseecom_listener_response(u32 listener_id, u32 status)
+{
+	struct qcom_scm_desc desc = {};
+	struct qcom_scm_qseecom_resp res = {};
+
+	desc.owner = QSEECOM_TZ_OWNER_QSEE_OS;
+	desc.svc = QSEECOM_TZ_SVC_LISTENER;
+	desc.cmd = QSEECOM_TZ_CMD_LISTENER_RESPONSE;
+	desc.arginfo = QCOM_SCM_ARGS(2, QCOM_SCM_VAL, QCOM_SCM_VAL);
+	desc.args[0] = listener_id;
+	desc.args[1] = status;
+
+	if (qcom_scm_qseecom_call(&desc, &res))
+		return -EIO;
+
+	return res.result == QSEECOM_RESULT_SUCCESS ? 0 : -EINVAL;
+}
+EXPORT_SYMBOL_GPL(qcom_scm_qseecom_listener_response);
+
+/**
+ * qcom_scm_qseecom_app_load_ex() - Load a QSEE app, reporting async states.
+ * @img:         Concatenated .mdt + .b0x image.
+ * @mdt_len:     Size of the .mdt part.
+ * @img_len:     Total size of the image.
+ * @listener_id: On -EAGAIN/-EBUSY, the listener QTEE is waiting for.
+ *
+ * Return: application id on success; -EAGAIN if QTEE returned INCOMPLETE;
+ *         -EBUSY if QTEE returned BLOCKED_ON_LISTENER; other negative
+ *         error code on failure.
+ */
+int qcom_scm_qseecom_app_load_ex(const void *img, size_t mdt_len,
+				 size_t img_len, u32 *listener_id)
+{
+	struct qcom_scm_desc desc = {};
+	struct qcom_scm_qseecom_resp res = {};
+	void *buf __free(qcom_tzmem) = NULL;
+	int status;
+
+	if (!img || !img_len || mdt_len > img_len)
+		return -EINVAL;
+
+	buf = qcom_tzmem_alloc(__scm->mempool, img_len, GFP_KERNEL);
+	if (!buf)
+		return -ENOMEM;
+
+	memcpy(buf, img, img_len);
+
+	desc.owner = QSEECOM_TZ_OWNER_QSEE_OS;
+	desc.svc = QSEECOM_TZ_SVC_APP_MGR;
+	desc.cmd = QSEECOM_TZ_CMD_APP_START;
+	desc.arginfo = QCOM_SCM_ARGS(3, QCOM_SCM_VAL, QCOM_SCM_VAL,
+				     QCOM_SCM_VAL);
+	desc.args[0] = mdt_len;
+	desc.args[1] = img_len;
+	desc.args[2] = qcom_tzmem_to_phys(buf);
+
+	status = qcom_scm_qseecom_call(&desc, &res);
+	if (status)
+		return status;
+
+	pr_info("qseecom: app_load_ex result=%lld type=%llx data=%llx\n",
+		res.result, res.resp_type, res.data);
+	if (listener_id)
+		*listener_id = (u32)res.data;
+
+	switch (res.result) {
+	case QSEECOM_RESULT_SUCCESS:
+		return (int)res.data;
+	case QSEECOM_RESULT_INCOMPLETE:
+		return -EAGAIN;
+	case QSEECOM_RESULT_BLOCKED_ON_LISTENER:
+		return -EBUSY;
+	case QSEECOM_RESULT_FAILURE:
+		return -EFAULT;
+	default:
+		return -EINVAL;
+	}
+}
+EXPORT_SYMBOL_GPL(qcom_scm_qseecom_app_load_ex);
 
 /**
  * qcom_scm_qseecom_app_send() - Send to and receive data from a given QSEE app.
@@ -2335,6 +3040,7 @@ static const struct of_device_id qcom_scm_qseecom_allowlist[] __maybe_unused = {
 	{ .compatible = "qcom,x1e80100-crd" },
 	{ .compatible = "qcom,x1e80100-qcp" },
 	{ .compatible = "qcom,x1p42100-crd" },
+	{ .compatible = "xiaomi,crux" },
 	{ }
 };
 
@@ -2416,13 +3122,29 @@ static int qcom_scm_qseecom_init(struct qcom_scm *scm)
  *
  * Return: On success, return 0 or <0 on failure.
  */
-int qcom_scm_qtee_invoke_smc(phys_addr_t inbuf, size_t inbuf_size,
-			     phys_addr_t outbuf, size_t outbuf_size,
-			     u64 *result, u64 *response_type)
+/*
+ * Known QTEE (smcinvoke) invoke command variants.
+ *
+ * Newer QTEE implementations (SM8350 and later) use
+ * QCOM_SCM_SMCINVOKE_INVOKE, while older ones (e.g. SM8150) only
+ * implement the legacy command. The first variant accepted by the
+ * firmware is selected during probe.
+ */
+static const u32 qcom_scm_qtee_invoke_cmds[] = {
+	QCOM_SCM_SMCINVOKE_INVOKE,
+	QCOM_SCM_SMCINVOKE_INVOKE_LEGACY,
+};
+
+static u32 qcom_scm_qtee_invoke_cmd = QCOM_SCM_SMCINVOKE_INVOKE;
+
+static int __qcom_scm_qtee_invoke_smc(u32 cmd, phys_addr_t inbuf,
+				      size_t inbuf_size, phys_addr_t outbuf,
+				      size_t outbuf_size, u64 *result,
+				      u64 *response_type)
 {
 	struct qcom_scm_desc desc = {
 		.svc = QCOM_SCM_SVC_SMCINVOKE,
-		.cmd = QCOM_SCM_SMCINVOKE_INVOKE,
+		.cmd = cmd,
 		.owner = ARM_SMCCC_OWNER_TRUSTED_OS,
 		.args[0] = inbuf,
 		.args[1] = inbuf_size,
@@ -2445,6 +3167,17 @@ int qcom_scm_qtee_invoke_smc(phys_addr_t inbuf, size_t inbuf_size,
 		*result = res.result[1];
 
 	return 0;
+}
+
+int qcom_scm_qtee_invoke_smc(u32 cmd, phys_addr_t inbuf, size_t inbuf_size,
+			     phys_addr_t outbuf, size_t outbuf_size,
+			     u64 *result, u64 *response_type)
+{
+	if (cmd == QCOM_SCM_QTEE_CMD_AUTO)
+		cmd = qcom_scm_qtee_invoke_cmd;
+
+	return __qcom_scm_qtee_invoke_smc(cmd, inbuf, inbuf_size, outbuf,
+					  outbuf_size, result, response_type);
 }
 EXPORT_SYMBOL(qcom_scm_qtee_invoke_smc);
 
@@ -2549,14 +3282,27 @@ static void qcom_scm_qtee_init(struct qcom_scm *scm)
 	struct platform_device *qtee_dev;
 	u64 result, response_type;
 	int ret;
+	int i;
 
 	/*
 	 * Probe for smcinvoke support. This will fail due to invalid buffers,
 	 * but first, it checks whether the call is supported in QTEE syscall
 	 * handler. If it is not supported, -EIO is returned.
+	 *
+	 * Try each known command variant: older platforms (e.g. SM8150)
+	 * only implement the legacy command.
 	 */
-	ret = qcom_scm_qtee_invoke_smc(0, 0, 0, 0, &result, &response_type);
-	if (ret == -EIO)
+	for (i = 0; i < ARRAY_SIZE(qcom_scm_qtee_invoke_cmds); i++) {
+		ret = __qcom_scm_qtee_invoke_smc(qcom_scm_qtee_invoke_cmds[i],
+						 0, 0, 0, 0, &result,
+						 &response_type);
+		if (ret != -EIO) {
+			qcom_scm_qtee_invoke_cmd = qcom_scm_qtee_invoke_cmds[i];
+			break;
+		}
+	}
+
+	if (i == ARRAY_SIZE(qcom_scm_qtee_invoke_cmds))
 		return;
 
 	/* Setup QTEE interface device. */
@@ -2859,7 +3605,7 @@ static int qcom_scm_probe(struct platform_device *pdev)
 	memset(&pool_config, 0, sizeof(pool_config));
 	pool_config.initial_size = 0;
 	pool_config.policy = QCOM_TZMEM_POLICY_ON_DEMAND;
-	pool_config.max_size = SZ_256K;
+	pool_config.max_size = SZ_16M;
 
 	scm->mempool = devm_qcom_tzmem_pool_new(scm->dev, &pool_config);
 	if (IS_ERR(scm->mempool)) {

@@ -3,26 +3,135 @@
  * Copyright (c) 2022-2024 Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
+#include <linux/math64.h>
 #include <media/v4l2-event.h>
 #include <media/v4l2-mem2mem.h>
 
 #include "iris_buffer.h"
 #include "iris_common.h"
 #include "iris_ctrls.h"
+#include "iris_hfi_gen1_defines.h"
 #include "iris_instance.h"
 #include "iris_power.h"
 #include "iris_vdec.h"
 #include "iris_vpu_buffer.h"
 
 #define DEFAULT_CODEC_ALIGNMENT 16
+#define IRIS1_TIMESTAMP_DISCONTINUITY_NS	NSEC_PER_SEC
+#define IRIS1_SEEK_TIMESTAMP_WINDOW_NS	(5ULL * NSEC_PER_SEC)
+#define IRIS1_SEEK_HOLD_FRAMES		30
+
+static void iris_vdec_reset_rate_window(struct iris_inst *inst)
+{
+	inst->last_buf_ns = 0;
+	inst->rate_min_timestamp = 0;
+	inst->rate_max_timestamp = 0;
+	inst->frame_counter = 0;
+}
+
+int iris_vdec_recycle_pending_output(struct iris_inst *inst)
+{
+	struct iris_buffer *buf = inst->pending_output;
+
+	if (!buf)
+		return 0;
+
+	inst->pending_output = NULL;
+	buf->data_size = 0;
+	buf->flags = 0;
+	buf->timestamp = 0;
+	buf->attr &= ~(BUF_ATTR_QUEUED | BUF_ATTR_DEQUEUED |
+		       BUF_ATTR_BUFFER_DONE);
+
+	return iris_queue_buffer(inst, buf);
+}
+
+int iris_vdec_complete_pending_output(struct iris_inst *inst)
+{
+	struct iris_buffer *buf = inst->pending_output;
+
+	if (!buf)
+		return 0;
+
+	inst->pending_output = NULL;
+
+	return iris_vb2_buffer_done(inst, buf);
+}
+
+int iris_vdec_hold_output(struct iris_inst *inst, struct iris_buffer *buf)
+{
+	if (inst->pending_output)
+		return -EBUSY;
+
+	inst->pending_output = buf;
+
+	return 0;
+}
+
+void iris_vdec_clear_pending_output(struct iris_inst *inst)
+{
+	inst->pending_output = NULL;
+}
+
+static int iris_vdec_track_input_timestamp(struct iris_inst *inst, u64 timestamp)
+{
+	u64 delta;
+	int ret;
+
+	if (!inst->core->iris_platform_data->legacy_vpu5)
+		return 0;
+
+	if (inst->input_timestamp_valid) {
+		delta = timestamp > inst->last_input_timestamp ?
+			timestamp - inst->last_input_timestamp :
+			inst->last_input_timestamp - timestamp;
+		if (delta > IRIS1_TIMESTAMP_DISCONTINUITY_NS) {
+			iris_vdec_reset_rate_window(inst);
+			inst->seek_timestamp = timestamp;
+			inst->seek_timestamp_pending = true;
+			inst->seek_hold_frames = IRIS1_SEEK_HOLD_FRAMES;
+			ret = iris_vdec_recycle_pending_output(inst);
+			if (ret)
+				return ret;
+		}
+	}
+
+	inst->last_input_timestamp = timestamp;
+	inst->input_timestamp_valid = true;
+
+	return 0;
+}
+
+bool iris_vdec_discard_stale_frame(struct iris_inst *inst, u64 timestamp)
+{
+	u64 delta;
+
+	if (!inst->seek_timestamp_pending)
+		return false;
+
+	if (timestamp >= inst->seek_timestamp) {
+		delta = timestamp - inst->seek_timestamp;
+		if (delta <= IRIS1_SEEK_TIMESTAMP_WINDOW_NS) {
+			inst->seek_timestamp_pending = false;
+			return false;
+		}
+	}
+
+	return true;
+}
 
 int iris_vdec_inst_init(struct iris_inst *inst)
 {
 	struct iris_core *core = inst->core;
 	struct v4l2_format *f;
+	int ret;
 
 	inst->fmt_src = kzalloc_obj(*inst->fmt_src);
 	inst->fmt_dst = kzalloc_obj(*inst->fmt_dst);
+	if (!inst->fmt_src || !inst->fmt_dst) {
+		ret = -ENOMEM;
+		goto error_free_formats;
+	}
 
 	inst->fw_min_count = 0;
 
@@ -59,7 +168,31 @@ int iris_vdec_inst_init(struct iris_inst *inst)
 	memcpy(&inst->fw_caps[0], &core->inst_fw_caps_dec[0],
 	       INST_FW_CAP_MAX * sizeof(struct platform_inst_fw_cap));
 
-	return iris_ctrls_init(inst);
+	ret = iris_ctrls_init(inst);
+	if (ret)
+		goto error_free_formats;
+
+	return 0;
+
+error_free_formats:
+	kfree(inst->fmt_dst);
+	kfree(inst->fmt_src);
+	inst->fmt_dst = NULL;
+	inst->fmt_src = NULL;
+
+	return ret;
+}
+
+u32 iris_vdec_raw_stride(u32 width, u32 pixelformat)
+{
+	switch (pixelformat) {
+	case V4L2_PIX_FMT_P010:
+		return ALIGN(width * 2, 256);
+	case V4L2_PIX_FMT_QC10C:
+		return ALIGN(width * 4 / 3, 256);
+	default:
+		return ALIGN(width, 128);
+	}
 }
 
 static const u32 iris_vdec_formats_cap[] = {
@@ -208,7 +341,7 @@ int iris_vdec_s_fmt(struct iris_inst *inst, struct v4l2_format *f)
 {
 	struct v4l2_format *fmt, *output_fmt;
 	struct vb2_queue *q;
-	u32 codec_align;
+	u32 codec_align, raw_pixfmt;
 
 	q = v4l2_m2m_get_vq(inst->m2m_ctx, f->type);
 
@@ -253,10 +386,13 @@ int iris_vdec_s_fmt(struct iris_inst *inst, struct v4l2_format *f)
 		output_fmt->fmt.pix_mp.xfer_func = f->fmt.pix_mp.xfer_func;
 		output_fmt->fmt.pix_mp.ycbcr_enc = f->fmt.pix_mp.ycbcr_enc;
 		output_fmt->fmt.pix_mp.quantization = f->fmt.pix_mp.quantization;
+		raw_pixfmt = output_fmt->fmt.pix_mp.pixelformat;
 
 		/* Update capture format based on new ip w/h */
 		output_fmt->fmt.pix_mp.width = ALIGN(f->fmt.pix_mp.width, 128);
 		output_fmt->fmt.pix_mp.height = ALIGN(f->fmt.pix_mp.height, 32);
+		output_fmt->fmt.pix_mp.plane_fmt[0].bytesperline =
+			iris_vdec_raw_stride(f->fmt.pix_mp.width, raw_pixfmt);
 		inst->buffers[BUF_OUTPUT].min_count = iris_vpu_buf_count(inst, BUF_OUTPUT);
 		inst->buffers[BUF_OUTPUT].size = iris_get_buffer_size(inst, BUF_OUTPUT);
 
@@ -272,26 +408,27 @@ int iris_vdec_s_fmt(struct iris_inst *inst, struct v4l2_format *f)
 		fmt = inst->fmt_dst;
 		fmt->type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
 		fmt->fmt.pix_mp.pixelformat = f->fmt.pix_mp.pixelformat;
+		raw_pixfmt = f->fmt.pix_mp.pixelformat;
 		fmt->fmt.pix_mp.num_planes = 1;
 		switch (f->fmt.pix_mp.pixelformat) {
 		case V4L2_PIX_FMT_P010:
 			fmt->fmt.pix_mp.width = ALIGN(f->fmt.pix_mp.width, 128);
 			fmt->fmt.pix_mp.height = ALIGN(f->fmt.pix_mp.height, 32);
 			fmt->fmt.pix_mp.plane_fmt[0].bytesperline =
-				ALIGN(f->fmt.pix_mp.width * 2, 256);
+				iris_vdec_raw_stride(f->fmt.pix_mp.width, raw_pixfmt);
 			break;
 		case V4L2_PIX_FMT_QC10C:
 			fmt->fmt.pix_mp.width = roundup(f->fmt.pix_mp.width, 192);
 			fmt->fmt.pix_mp.height = ALIGN(f->fmt.pix_mp.height, 16);
 			fmt->fmt.pix_mp.plane_fmt[0].bytesperline =
-				ALIGN(f->fmt.pix_mp.width * 4 / 3, 256);
+				iris_vdec_raw_stride(f->fmt.pix_mp.width, raw_pixfmt);
 			break;
 		case V4L2_PIX_FMT_NV12:
 		case V4L2_PIX_FMT_QC08C:
 			fmt->fmt.pix_mp.width = ALIGN(f->fmt.pix_mp.width, 128);
 			fmt->fmt.pix_mp.height = ALIGN(f->fmt.pix_mp.height, 32);
 			fmt->fmt.pix_mp.plane_fmt[0].bytesperline =
-				ALIGN(f->fmt.pix_mp.width, 128);
+				iris_vdec_raw_stride(f->fmt.pix_mp.width, raw_pixfmt);
 			break;
 		}
 		fmt->fmt.pix_mp.plane_fmt[0].sizeimage = iris_get_buffer_size(inst, BUF_OUTPUT);
@@ -360,11 +497,33 @@ void iris_vdec_src_change(struct iris_inst *inst)
 
 int iris_vdec_streamon_input(struct iris_inst *inst)
 {
+	const struct iris_hfi_session_ops *hfi_ops = inst->hfi_session_ops;
+	u32 output_order = HFI_OUTPUT_ORDER_DECODE;
 	int ret;
+
+	inst->streamoff_pending = false;
+	inst->input_timestamp_valid = false;
+	inst->seek_timestamp_pending = false;
+	inst->corrupt_output_drops = 0;
+	inst->pending_output = NULL;
+	inst->seek_hold_frames = 0;
+	inst->frame_rate = MAXIMUM_FPS;
+	inst->frame_rate_down_count = 0;
 
 	ret = iris_set_properties(inst, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE);
 	if (ret)
 		return ret;
+
+	if (inst->core->iris_platform_data->legacy_vpu5 &&
+	    inst->display_delay_enable && !inst->display_delay) {
+		ret = hfi_ops->session_set_property(inst,
+				 HFI_PROPERTY_PARAM_VDEC_OUTPUT_ORDER,
+				 HFI_HOST_FLAGS_NONE, HFI_PORT_BITSTREAM,
+				 HFI_PAYLOAD_U32_ENUM, &output_order,
+				 sizeof(output_order));
+		if (ret)
+			return ret;
+	}
 
 	ret = iris_alloc_and_queue_persist_bufs(inst, BUF_PERSIST);
 	if (ret)
@@ -384,7 +543,7 @@ int iris_vdec_streamon_input(struct iris_inst *inst)
 	if (ret)
 		return ret;
 
-	inst->frame_counter = 0;
+	iris_vdec_reset_rate_window(inst);
 
 	return iris_process_streamon_input(inst);
 }
@@ -393,6 +552,8 @@ int iris_vdec_streamon_output(struct iris_inst *inst)
 {
 	const struct iris_hfi_session_ops *hfi_ops = inst->hfi_session_ops;
 	int ret;
+
+	inst->streamoff_pending = false;
 
 	ret = hfi_ops->session_set_config_params(inst, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE);
 	if (ret)
@@ -428,7 +589,8 @@ int iris_vdec_qbuf(struct iris_inst *inst, struct vb2_v4l2_buffer *vbuf)
 {
 	struct iris_buffer *buf = to_iris_buffer(vbuf);
 	struct vb2_buffer *vb2 = &vbuf->vb2_buf;
-	u64 cur_buf_ns, delta_ns;
+	u64 cur_buf_ns, delta_ns, timestamp_delta_ns;
+	u32 measured_fps, qbuf_fps, timestamp_fps, target_fps;
 	struct vb2_queue *q;
 	int ret;
 
@@ -446,18 +608,55 @@ int iris_vdec_qbuf(struct iris_inst *inst, struct vb2_v4l2_buffer *vbuf)
 	}
 
 	if (buf->type == BUF_INPUT) {
+		ret = iris_vdec_track_input_timestamp(inst, buf->timestamp);
+		if (ret)
+			return ret;
+
 		cur_buf_ns = ktime_get_ns();
 
-		if (!inst->frame_counter)
+		if (!inst->frame_counter) {
 			inst->last_buf_ns = cur_buf_ns;
+			inst->rate_min_timestamp = buf->timestamp;
+			inst->rate_max_timestamp = buf->timestamp;
+		} else {
+			inst->rate_min_timestamp =
+				min(inst->rate_min_timestamp, buf->timestamp);
+			inst->rate_max_timestamp =
+				max(inst->rate_max_timestamp, buf->timestamp);
+		}
 
 		inst->frame_counter++;
 		delta_ns = cur_buf_ns - inst->last_buf_ns;
 
 		if (delta_ns >= NSEC_PER_SEC) {
-			inst->frame_rate = clamp_t(u32, inst->frame_counter, DEFAULT_FPS,
-						   MAXIMUM_FPS);
-			inst->frame_counter = 0;
+			qbuf_fps = div64_u64((u64)(inst->frame_counter - 1) *
+					       NSEC_PER_SEC + delta_ns - 1,
+					       delta_ns);
+			timestamp_delta_ns = inst->rate_max_timestamp -
+						     inst->rate_min_timestamp;
+			timestamp_fps = 0;
+			if (inst->core->iris_platform_data->legacy_vpu5 &&
+			    timestamp_delta_ns && inst->frame_counter > 1)
+				timestamp_fps = div64_u64((u64)(inst->frame_counter - 1) *
+					NSEC_PER_SEC +
+					timestamp_delta_ns - 1, timestamp_delta_ns);
+
+			measured_fps = clamp_t(u32, max(qbuf_fps, timestamp_fps),
+					       1, MAXIMUM_FPS);
+			target_fps = clamp_t(u32,
+					     DIV_ROUND_UP(measured_fps * 11, 10),
+					     DEFAULT_FPS, MAXIMUM_FPS);
+
+			if (inst->frame_rate == MAXIMUM_FPS ||
+			    target_fps >= inst->frame_rate) {
+				inst->frame_rate = target_fps;
+				inst->frame_rate_down_count = 0;
+			} else if (++inst->frame_rate_down_count >= 3) {
+				inst->frame_rate = target_fps;
+				inst->frame_rate_down_count = 0;
+			}
+
+			iris_vdec_reset_rate_window(inst);
 		}
 	}
 

@@ -3,6 +3,8 @@
  * Copyright (c) 2022-2024 Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
+#include <linux/dma-mapping.h>
+#include <linux/module.h>
 #include <media/videobuf2-dma-contig.h>
 #include <media/v4l2-event.h>
 #include <media/v4l2-mem2mem.h>
@@ -13,6 +15,80 @@
 #include "iris_vdec.h"
 #include "iris_venc.h"
 #include "iris_power.h"
+
+#define IRIS1_VP9_IOVA_HOLE_SIZE	0x04000000ULL
+
+static bool cached_capture;
+module_param(cached_capture, bool, 0444);
+MODULE_PARM_DESC(cached_capture,
+		 "Use cacheable H.264/HEVC/VP9 CAPTURE MMAP buffers on legacy Iris1");
+
+static bool iris1_use_cached_capture(struct iris_inst *inst,
+				     struct vb2_queue *q)
+{
+	return cached_capture &&
+	       inst->core->iris_platform_data->legacy_vpu5 &&
+	       (inst->codec == V4L2_PIX_FMT_H264 ||
+		inst->codec == V4L2_PIX_FMT_HEVC ||
+		inst->codec == V4L2_PIX_FMT_VP9) &&
+	       V4L2_TYPE_IS_CAPTURE(q->type) &&
+	       q->memory == VB2_MEMORY_MMAP;
+}
+
+static bool iris1_vp9_needs_iova_hole(struct iris_inst *inst)
+{
+	return inst->core->iris_platform_data->legacy_vpu5 &&
+	       inst->codec == V4L2_PIX_FMT_VP9;
+}
+
+int iris_vb2_vp9_alloc_high_iova_hole(struct iris_inst *inst)
+{
+	struct iris_core *core = inst->core;
+	size_t size = IRIS1_VP9_IOVA_HOLE_SIZE;
+	dma_addr_t daddr;
+	void *vaddr;
+
+	if (!iris1_vp9_needs_iova_hole(inst) || inst->vp9_iova_hole_size)
+		return 0;
+
+	vaddr = dma_alloc_attrs(core->dev, size, &daddr, GFP_KERNEL, DMA_ATTR_WRITE_COMBINE);
+	if (!vaddr)
+		return -ENOMEM;
+
+	inst->vp9_iova_hole_vaddr = vaddr;
+	inst->vp9_iova_hole_daddr = daddr;
+	inst->vp9_iova_hole_size = size;
+	dev_info(core->dev,
+		 "Iris1: reserved VP9 high IOVA hole %#llx-%#llx\n",
+		 (unsigned long long)daddr,
+		 (unsigned long long)daddr + size - 1);
+
+	return 0;
+}
+
+void iris_vb2_vp9_release_high_iova_hole(struct iris_inst *inst)
+{
+	struct iris_core *core = inst->core;
+	dma_addr_t daddr;
+	void *vaddr;
+	size_t size;
+
+	if (!inst->vp9_iova_hole_size)
+		return;
+
+	vaddr = inst->vp9_iova_hole_vaddr;
+	daddr = inst->vp9_iova_hole_daddr;
+	size = inst->vp9_iova_hole_size;
+	inst->vp9_iova_hole_vaddr = NULL;
+	inst->vp9_iova_hole_daddr = 0;
+	inst->vp9_iova_hole_size = 0;
+
+	dma_free_attrs(core->dev, size, vaddr, daddr, DMA_ATTR_WRITE_COMBINE);
+	dev_info(core->dev,
+		 "Iris1: released VP9 high IOVA hole %#llx-%#llx\n",
+		 (unsigned long long)daddr,
+		 (unsigned long long)daddr + size - 1);
+}
 
 static int iris_check_inst_mbpf(struct iris_inst *inst)
 {
@@ -115,6 +191,11 @@ int iris_vb2_queue_setup(struct vb2_queue *q,
 	core = inst->core;
 	f = V4L2_TYPE_IS_OUTPUT(q->type) ? inst->fmt_src : inst->fmt_dst;
 
+	if (iris1_use_cached_capture(inst, q)) {
+		q->dma_dir = DMA_FROM_DEVICE;
+		q->non_coherent_mem = true;
+	}
+
 	if (*num_planes) {
 		if (*num_planes != f->fmt.pix_mp.num_planes ||
 		    sizes[0] < f->fmt.pix_mp.plane_fmt[0].sizeimage)
@@ -139,6 +220,14 @@ int iris_vb2_queue_setup(struct vb2_queue *q,
 		ret = iris_inst_change_state(inst, IRIS_INST_INIT);
 		if (ret)
 			goto unlock;
+	}
+
+	if (V4L2_TYPE_IS_OUTPUT(q->type)) {
+		ret = iris_vb2_vp9_alloc_high_iova_hole(inst);
+		if (ret)
+			goto unlock;
+	} else if (V4L2_TYPE_IS_CAPTURE(q->type)) {
+		iris_vb2_vp9_release_high_iova_hole(inst);
 	}
 
 	*num_planes = 1;
@@ -235,6 +324,8 @@ void iris_vb2_stop_streaming(struct vb2_queue *q)
 		return;
 
 	mutex_lock(&inst->lock);
+	if (inst->domain == DECODER && V4L2_TYPE_IS_CAPTURE(q->type))
+		iris_vdec_clear_pending_output(inst);
 
 	if (!V4L2_TYPE_IS_OUTPUT(q->type) &&
 	    !V4L2_TYPE_IS_CAPTURE(q->type))

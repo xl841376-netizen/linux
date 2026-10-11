@@ -189,6 +189,68 @@ struct msm_dsi_host {
 	int irq;
 };
 
+
+/*
+ * [crux] 初始化录制：把 DSI 寄存器写和 DCS 写包记下来，
+ * 交接时交给 GRUB 重放（重放的就是内核自己那套，校验必过）。
+ */
+#define CRUX_REC_MAX	512
+struct crux_rec { u32 off; u32 val; };
+static struct crux_rec crux_rec[CRUX_REC_MAX];
+static int crux_rec_n;
+#define CRUX_DCS_MAX	1024
+#define CRUX_DCS_CNT	32
+static u8 crux_dcs[CRUX_DCS_MAX];
+static u16 crux_dcs_len[CRUX_DCS_CNT];
+static int crux_dcs_n, crux_dcs_used;
+static bool crux_rec_on = true;
+static struct msm_dsi *crux_rec_msm_dsi;
+
+static void crux_rec_reg(u32 reg, u32 val)
+{
+	if (crux_rec_on && crux_rec_n < CRUX_REC_MAX) {
+		crux_rec[crux_rec_n].off = reg;
+		crux_rec[crux_rec_n].val = val;
+		crux_rec_n++;
+	}
+}
+
+static void crux_rec_dcs(const struct mipi_dsi_msg *msg)
+{
+	const u8 *p = msg->tx_buf;
+	int i, len;
+
+	if (!crux_rec_on || msg->rx_len || !msg->tx_len)
+		return;
+	len = msg->tx_len;
+	if (crux_dcs_n >= CRUX_DCS_CNT || crux_dcs_used + len > CRUX_DCS_MAX)
+		return;
+	crux_dcs_len[crux_dcs_n] = len;
+	for (i = 0; i < len; i++)
+		crux_dcs[crux_dcs_used + i] = p[i];
+	crux_dcs_used += len;
+	crux_dcs_n++;
+}
+
+void crux_rec_dump(void)
+{
+	int i, off = 0;
+
+	if (!crux_rec_on)
+		return;
+	crux_rec_on = false;
+	msm_dsi_phy_crux_dump(crux_rec_msm_dsi ? crux_rec_msm_dsi->phy : NULL);
+	pr_info("crux-rec: regs=%d dcs=%d\n", crux_rec_n, crux_dcs_n);
+	for (i = 0; i < crux_rec_n; i++)
+		pr_info("crux-rec R %03x %08x\n", crux_rec[i].off, crux_rec[i].val);
+	for (i = 0; i < crux_dcs_n; i++) {
+		int l = crux_dcs_len[i];
+
+		pr_info("crux-rec D %d %*ph\n", l, l, crux_dcs + off);
+		off += l;
+	}
+}
+
 static inline u32 dsi_read(struct msm_dsi_host *msm_host, u32 reg)
 {
 	return readl(msm_host->ctrl_base + reg);
@@ -196,6 +258,7 @@ static inline u32 dsi_read(struct msm_dsi_host *msm_host, u32 reg)
 
 static inline void dsi_write(struct msm_dsi_host *msm_host, u32 reg, u32 data)
 {
+	crux_rec_reg(reg, data);
 	writel(data, msm_host->ctrl_base + reg);
 }
 
@@ -1681,6 +1744,8 @@ static void dsi_error(struct msm_dsi_host *msm_host)
 	queue_work(msm_host->workqueue, &msm_host->err_work);
 }
 
+extern void crux_panel_frames_ready(void);
+
 static irqreturn_t dsi_host_irq(int irq, void *ptr)
 {
 	struct msm_dsi_host *msm_host = ptr;
@@ -1703,8 +1768,17 @@ static irqreturn_t dsi_host_irq(int irq, void *ptr)
 	if (isr & DSI_IRQ_VIDEO_DONE)
 		complete(&msm_host->video_comp);
 
-	if (isr & DSI_IRQ_CMD_DMA_DONE)
+	if (isr & DSI_IRQ_CMD_DMA_DONE) {
+		/*
+		 * [crux] 交接：命令模式下每送完一帧就进这里。前几帧是链路刚重配
+		 * 出来的错帧，数够 30 帧（约 0.5 秒）再让面板点亮，那 0.几 秒花屏就没了。
+		 */
+		static int crux_frames;
+
 		complete(&msm_host->dma_comp);
+		if (crux_frames < 30 && ++crux_frames == 30)
+			crux_panel_frames_ready();
+	}
 
 	return IRQ_HANDLED;
 }
@@ -1779,6 +1853,8 @@ static ssize_t dsi_host_transfer(struct mipi_dsi_host *host,
 
 	if (!msg || !msm_host->power_on)
 		return -EINVAL;
+
+	crux_rec_dcs(msg);
 
 	mutex_lock(&msm_host->cmd_mutex);
 	ret = msm_dsi_manager_cmd_xfer(msm_host->id, msg);
@@ -2008,6 +2084,8 @@ int msm_dsi_host_init(struct msm_dsi *msm_dsi)
 	struct platform_device *pdev = msm_dsi->pdev;
 	const struct msm_dsi_config *cfg;
 	int ret;
+
+	crux_rec_msm_dsi = msm_dsi;
 
 	msm_host = devm_kzalloc(&pdev->dev, sizeof(*msm_host), GFP_KERNEL);
 	if (!msm_host)
@@ -2528,6 +2606,11 @@ int msm_dsi_host_power_on(struct mipi_dsi_host *host,
 		goto fail_disable_clk;
 	}
 
+	pr_info("crux-dsi probe: CTRL=%08x TRIG=%08x CFG0=%08x SCR1=%08x\n",
+		dsi_read(msm_host, REG_DSI_CTRL),
+		dsi_read(msm_host, REG_DSI_TRIG_CTRL),
+		dsi_read(msm_host, REG_DSI_CMD_CFG0),
+		dsi_read(msm_host, 0x1f8));
 	dsi_timing_setup(msm_host, is_bonded_dsi);
 	dsi_sw_reset(msm_host);
 	dsi_ctrl_enable(msm_host, phy_shared_timings, phy);

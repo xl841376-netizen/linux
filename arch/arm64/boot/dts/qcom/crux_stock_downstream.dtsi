@@ -1,0 +1,485 @@
+/* 原厂 fdt 里有的、主线没有对应驱动的那部分（保留原厂语义） */
+
+&soc {
+	mdm3: qcom,mdm3 {
+		cell-index = <0>;
+		#address-cells = <0>;
+		interrupt-parent = <&mdm3>;
+		#interrupt-cells = <1>;
+		interrupt-map-mask = <0xffffffff>;
+		interrupt-names = "err_fatal_irq", "status_irq", "mdm2ap_vddmin_irq";
+		qcom,ramdump-delay-ms = <3000>;
+		qcom,ramdump-timeout-ms = <120000>;
+		qcom,vddmin-modes = "normal";
+		qcom,vddmin-drive-strength = <8>;
+		qcom,sfr-query;
+		qcom,sysmon-id = <20>;
+		qcom,ssctl-instance-id = <16>;
+		qcom,support-shutdown;
+		qcom,pil-force-shutdown;
+		pinctrl-names = "default", "mdm_active", "mdm_suspend";
+		pinctrl-0 = <&ap2mdm_pon_reset_default>;
+		pinctrl-1 = <&ap2mdm_active &mdm2ap_active>;
+		pinctrl-2 = <&ap2mdm_sleep &mdm2ap_sleep>;
+		interrupt-map = <0 &tlmm 53 3 1 &tlmm 135 3>;
+		qcom,mdm2ap-errfatal-gpio = <&tlmm 53 0>;
+		qcom,ap2mdm-errfatal-gpio = <&tlmm 141 0>;
+		qcom,mdm2ap-status-gpio = <&tlmm 142 0>;
+		qcom,ap2mdm-status-gpio = <&tlmm 135 0>;
+		qcom,ap2mdm-soft-reset-gpio = <&pm8150l_gpios 9 0>;
+		qcom,esoc-skip-restart-for-mdm-crash;
+		status = "okay";
+		compatible = "qcom,ext-sdx50m";
+		qcom,mdm-link-info = "0305_01.01.00";
+
+		/* [crux 2026-09-29 对齐原厂] 原厂给外挂 X50 的“条件接口”
+		 * （值照抄 crux-sm8150-overlay.dtbo 解出来的 X50 MHI 节点）：
+		 *   qcom,smmu-cfg = <0x00>      不做 S1 attach（设备侧不做地址翻译）
+		 *   qcom,addr-win = 0xa0000000..0xa4bfffff   主机给设备的地址窗口
+		 *   mhi,use-bb / mhi,allow-m1  用 bounce buffer / 允许 M1
+		 *   memory-region              即原厂的“mhi_mem”（见 reserved-memory 里 mhi_region）
+		 * 窗口里三块：pil_buffer_p2@a0000000 16MB + pil_buffer_p1@a1000000 44MB
+		 *   + mhi_region@a3c00000 16MB，正好铺满 addr-win。
+		 * 只有 mhi_region 带 compatible = shared-dma-pool（能当 DMA 池）；两块 pil
+		 * buffer 没有 compatible（原厂也没有），指向它们绑定时会 -EINVAL。
+		 */
+		qcom,smmu-cfg = <0x00>;
+		qcom,addr-win = <0x0 0xa0000000 0x0 0xa4bfffff>;
+		mhi,use-bb;
+		mhi,allow-m1;
+		memory-region = <&mhi_region>;
+	};
+	qcom_seecom: qseecom@87900000 {
+		compatible = "qcom,qseecom";
+		reg = <0x0 0x87900000 0x0 0x3e00000>;
+		reg-names = "secapp-region";
+		memory-region = <&qseecom_mem>;
+		qcom,hlos-num-ce-hw-instances = <1>;
+		qcom,hlos-ce-hw-instance = <0>;
+		qcom,qsee-ce-hw-instance = <0>;
+		qcom,disk-encrypt-pipe-pair = <2>;
+		qcom,support-fde;
+		qcom,no-clock-support;
+		qcom,fde-key-size;
+		qcom,appsbl-qseecom-support;
+		qcom,commonlib64-loaded-by-uefi;
+		qcom,qsee-reentrancy-support = <2>;
+	};
+	qcom_smcinvoke: smcinvoke@87900000 {
+		compatible = "qcom,smcinvoke";
+		reg = <0x0 0x87900000 0x0 0x3e00000>;
+		reg-names = "secapp-region";
+	};
+	ssc_sensors: qcom,msm-ssc-sensors {
+		compatible = "qcom,msm-ssc-sensors";
+		status = "ok";
+		qcom,firmware-name = "slpi_cr";
+	};
+	xiaomi_touch {
+		compatible = "xiaomi-touch";
+		status = "ok";
+		touch,name = "xiaomi-touch";
+	};
+	mdm3: qcom,mdm3 {
+		cell-index = <0>;
+		#address-cells = <0>;
+		interrupt-parent = <&mdm3>;
+		#interrupt-cells = <1>;
+		interrupt-map-mask = <0xffffffff>;
+		interrupt-names = "err_fatal_irq", "status_irq", "mdm2ap_vddmin_irq";
+		qcom,ramdump-delay-ms = <3000>;
+		qcom,ramdump-timeout-ms = <120000>;
+		qcom,vddmin-modes = "normal";
+		qcom,vddmin-drive-strength = <8>;
+		qcom,sfr-query;
+		qcom,sysmon-id = <20>;
+		qcom,ssctl-instance-id = <16>;
+		qcom,support-shutdown;
+		qcom,pil-force-shutdown;
+		pinctrl-names = "default", "mdm_active", "mdm_suspend";
+		pinctrl-0 = <&ap2mdm_pon_reset_default>;
+		pinctrl-1 = <&ap2mdm_active &mdm2ap_active>;
+		pinctrl-2 = <&ap2mdm_sleep &mdm2ap_sleep>;
+		interrupt-map = <0 &tlmm 53 3 1 &tlmm 135 3>;
+		qcom,mdm2ap-errfatal-gpio = <&tlmm 53 0>;
+		qcom,ap2mdm-errfatal-gpio = <&tlmm 141 0>;
+		qcom,mdm2ap-status-gpio = <&tlmm 142 0>;
+		qcom,ap2mdm-status-gpio = <&tlmm 135 0>;
+		qcom,ap2mdm-soft-reset-gpio = <&pm8150l_gpios 9 0>;
+		qcom,esoc-skip-restart-for-mdm-crash;
+		status = "okay";
+		compatible = "qcom,ext-sdx50m";
+		qcom,mdm-link-info = "0305_01.01.00";
+
+		/* [crux 2026-09-29 对齐原厂] 原厂给外挂 X50 的“条件接口”
+		 * （值照抄 crux-sm8150-overlay.dtbo 解出来的 X50 MHI 节点）：
+		 *   qcom,smmu-cfg = <0x00>      不做 S1 attach（设备侧不做地址翻译）
+		 *   qcom,addr-win = 0xa0000000..0xa4bfffff   主机给设备的地址窗口
+		 *   mhi,use-bb / mhi,allow-m1  用 bounce buffer / 允许 M1
+		 *   memory-region              即原厂的“mhi_mem”（见 reserved-memory 里 mhi_region）
+		 * 窗口里三块：pil_buffer_p2@a0000000 16MB + pil_buffer_p1@a1000000 44MB
+		 *   + mhi_region@a3c00000 16MB，正好铺满 addr-win。
+		 * 只有 mhi_region 带 compatible = shared-dma-pool（能当 DMA 池）；两块 pil
+		 * buffer 没有 compatible（原厂也没有），指向它们绑定时会 -EINVAL。
+		 */
+		qcom,smmu-cfg = <0x00>;
+		qcom,addr-win = <0x0 0xa0000000 0x0 0xa4bfffff>;
+		mhi,use-bb;
+		mhi,allow-m1;
+		memory-region = <&mhi_region>;
+	};
+};
+
+&i2c4 {
+	aqt1000-i2c-codec@d {
+		compatible = "qcom,aqt1000-i2c-codec";
+		reg = <0x0d>;
+		interrupt-controller;
+		#interrupt-cells = <1>;
+		interrupt-parent = <&tlmm>;
+		qcom,gpio-connect = <&tlmm 125 0>;
+		status = "okay";
+	};
+};
+
+&i2c9 {
+	nq@28 {
+		compatible = "qcom,nq-nci";
+		reg = <0x28>;
+
+		qcom,nq-irq = <&tlmm 47 0>;
+		qcom,nq-ven = <&tlmm 36 0>;
+		qcom,nq-firm = <&tlmm 48 0>;
+		qcom,nq-clkreq = <&tlmm 113 0>;
+
+		interrupt-parent = <&tlmm>;
+		interrupts = <47 0>;
+		interrupt-names = "nfc_irq";
+
+		pinctrl-names = "nfc_active", "nfc_suspend";
+		pinctrl-0 = <&nfc_int_active &nfc_enable_active &nfc_clk_req_active>;
+		pinctrl-1 = <&nfc_int_suspend &nfc_enable_suspend &nfc_clk_req_suspend>;
+	};
+};
+
+&i2c17 {
+	touchscreen@49 {
+		compatible = "st,fts";
+		reg = <0x49>;
+
+		interrupt-parent = <&tlmm>;
+		interrupts = <122 IRQ_TYPE_EDGE_FALLING>;
+
+		st,irq-gpio = <&tlmm 122 0x2008>;
+		st,reset-gpio = <&tlmm 12 GPIO_ACTIVE_LOW>;
+
+		vdd-supply = <&touch_vddio_vreg>;
+		avdd-supply = <&vreg_l1c_1p8>;
+		st,regulator_dvdd = "vdd";
+		st,regulator_avdd = "avdd";
+		st,max-coords = <1080 2340>;
+
+		pinctrl-names = "default", "pmx_ts_suspend";
+		pinctrl-0 = <&ts_active>;
+		pinctrl-1 = <&ts_int_suspend &ts_reset_suspend>;
+
+		firmware-name = "ftm5_fw.ftb";
+	};
+};
+
+&i2c7 {
+	aw8697_haptic@5a {
+		compatible = "awinic,aw8697_haptic";
+		reg = <0x5A>;
+		reset-gpio = <&tlmm 6 0>;
+		irq-gpio = <&tlmm 27 0>;
+		vib_mode = < 0 >;
+		vib_f0_pre = < 1700 >;
+		vib_f0_cali_percen = < 7 >;
+		vib_cont_drv_lev = < 88 >;
+		vib_cont_drv_lvl_ov = < 88 >;
+		vib_cont_td = < 0xf06c >;
+		vib_cont_zc_thr = < 0x08f8 >;
+		vib_cont_num_brk = < 3 >;
+		vib_f0_coeff = < 260 >;
+		vib_f0_trace_parameter = < 9 3 1 31 >;
+		vib_bemf_config = < 0 0x08 0x03 0xf8 >;
+		vib_sw_brake = < 0x2c >;
+		vib_tset = < 0x12 >;
+		vib_r_spare = < 0x68 >;
+		vib_bstdbg = < 0x30 0xeb 0xd4 0 0 0 >;
+		vib_effect_id_boundary = < 10 >;
+		vib_effect_max = < 170 >;
+		vib_trig_config = < 0 1 0 1 2
+					0 1 0 1 2
+					0 1 0 1 2 >;
+		vib_bst_vol_default = < 0x1b >;
+		vib_bst_vol_ram = < 0x1b >;
+		vib_bst_vol_rtp = < 0x16 >;
+		pinctrl-names = "aw8697_reset_reset","aw8697_reset_active","aw8697_interrupt_active";
+		pinctrl-0 = <&msm_gpio_6>;
+		pinctrl-1 = <&msm_gpio_6_output_high>;
+		pinctrl-2 = <&msm_gpio_27>;
+		status = "ok";
+		wf_0 {
+			qcom,effect-id = <0>;
+			qcom,wf-vmax-mv = <3600>;
+			qcom,wf-pattern = [3e 3e];
+			qcom,wf-brake-pattern = [02 01 00 00];
+			qcom,wf-play-rate-us = <20000>;
+		};
+		wf_1 {
+			qcom,effect-id = <1>;
+			qcom,wf-vmax-mv = <3600>;
+			qcom,wf-pattern = [7e 3e];
+			qcom,wf-brake-pattern = [03 01 00 00];
+			qcom,wf-play-rate-us = <20000>;
+		};
+		wf_2 {
+			qcom,effect-id = <2>;
+			qcom,wf-vmax-mv = <3600>;
+			qcom,wf-pattern = [7e 3e];
+			qcom,wf-brake-pattern = [02 01 00 00];
+			qcom,wf-play-rate-us = <20000>;
+		};
+		wf_3 {
+			qcom,effect-id = <3>;
+			qcom,wf-vmax-mv = <3600>;
+			qcom,wf-pattern = [3e 3e];
+			qcom,wf-brake-pattern = [02 01 00 00];
+			qcom,wf-play-rate-us = <20000>;
+		};
+		wf_4 {
+			qcom,effect-id = <4>;
+			qcom,wf-vmax-mv = <3600>;
+			qcom,wf-pattern = [3e 3e];
+			qcom,wf-brake-pattern = [02 01 00 00];
+			qcom,wf-play-rate-us = <28000>;
+		};
+		wf_5 {
+			qcom,effect-id = <5>;
+			qcom,wf-vmax-mv = <3600>;
+			qcom,wf-pattern = [7e 7e 7e];
+			qcom,wf-brake-pattern = [03 03 01 00];
+			qcom,wf-play-rate-us = <20000>;
+		};
+		wf_6 {
+			qcom,effect-id = <6>;
+			qcom,wf-vmax-mv = <3600>;
+			qcom,wf-pattern = [3e 3e];
+			qcom,wf-brake-pattern = [02 01 00 00];
+			qcom,wf-play-rate-us = <20000>;
+		};
+		wf_7 {
+			qcom,effect-id = <7>;
+			qcom,wf-vmax-mv = <3600>;
+			qcom,wf-pattern = [3e 3e];
+			qcom,wf-brake-pattern = [02 01 00 00];
+			qcom,wf-play-rate-us = <20000>;
+		};
+		wf_8 {
+			qcom,effect-id = <8>;
+			qcom,wf-vmax-mv = <3600>;
+			qcom,wf-pattern = [3e 3e];
+			qcom,wf-brake-pattern = [02 01 00 00];
+			qcom,wf-play-rate-us = <20000>;
+		};
+		wf_9 {
+			qcom,effect-id = <9>;
+			qcom,wf-vmax-mv = <3600>;
+			qcom,wf-pattern = [3e 3e];
+			qcom,wf-brake-pattern = [02 01 00 00];
+			qcom,wf-play-rate-us = <20000>;
+		};
+	};
+};
+
+&i2c10 {
+	tas2557@4c {
+		compatible = "ti,tas2557";
+		reg = <0x4c>;
+		ti,cdc-reset-gpio = <&tlmm 59 0>;
+		ti,irq-gpio = <&tlmm 115 0>;
+		ti,i2s-bits = <16>;
+		ti,bypass-tmax = <0>;
+	};
+};
+
+/* 从 stock 同步段里挪过来的：主线无驱动的那两类（充电器/电量计/电池 profile） */
+&{/soc@0/spmi@c440000/pmic@2} {
+
+					pm8150b_charger: qcom,qpnp-smb5 {
+						compatible = "qcom,qpnp-smb5";
+						#address-cells = <0x01>;
+						#size-cells = <0x01>;
+						#cooling-cells = <0x02>;
+						qcom,thermal-mitigation = <0x2dc6c0 0x2ab980 0x27ac40 0x249f00 0x2191c0 0x200b20 0x1e8480 0x1b7740 0x186a00 0x16e360 0x155cc0 0x124f80 0xf4240 0xdbba0 0xc3500 0x7a120>;
+						qcom,chg-term-src = <0x01>;
+						qcom,charger-temp-max = <0x320>;
+						qcom,smb-temp-max = <0x320>;
+						dpdm-supply = <&usb_1_hsphy>;   /* 原厂 0x26b=hsphy@88e2000，主线是 usb_1_hsphy */
+						qcom,sec-charger-config = <0x01>;
+						qcom,sw-jeita-enable;
+						qcom,wd-bark-time-secs = <0x10>;
+						qcom,cp-mode = <0x02>;
+						qcom,usb-icl-ua = "", "=\t";
+						qcom,fcc-max-ua = <0x7a1200>;
+						qcom,fv-max-uv = "", "D\\";
+						qcom,dc-icl-ua = <0x7a120>;
+						qcom,auto-recharge-vbat-mv = <0x111c>;
+						qcom,step-charging-enable;
+						qcom,chg-term-current-ma = <0xffffff24>;
+						qcom,chg-term-base-current-ma = <0x32>;
+						qcom,thermal-mitigation-icl = <0x2ab980 0x2932e0 0x27ac40 0x249f00 0x249f00 0x249f00 0x249f00 0x249f00 0x249f00 0x200b20 0x1cfde0 0x19f0a0 0x16e360 0x13d620 0xf4240 0xb71b0>;
+						qcom,thermal-mitigation-dcp = <0x1b7740 0x1b7740 0x1b7740 0x1b7740 0x1b7740 0x1b7740 0x1b7740 0x1b7740 0x1b7740 0x19f0a0 0x186a00 0x155cc0 0x124f80 0x10c8e0 0x10c8e0 0xf4240>;
+						qcom,thermal-mitigation-qc2 = <0x16e360 0x16e360 0x16e360 0x16e360 0x162010 0x155cc0 0x149970 0x13d620 0x13d620 0x124f80 0xf4240 0xdbba0 0xcf850 0xb71b0 0x9eb10 0x7a120>;
+						qcom,thermal-fcc-qc3-normal = <0x30d400 0x2dc6c0 0x2ab980 0x27ac40 0x2625a0 0x249f00 0x231860 0x2191c0 0x200b20 0x1b7740 0x186a00 0x155cc0 0x124f80 0xf4240 0xb71b0 0xb71b0>;
+						qcom,thermal-fcc-qc3-cp = <0x36ee80 0x36ee80 0x36ee80 0x36ee80 0x30d400 0x30d400 0x30d400 0x30d400 0x2f4d60 0x2ab980 0x249f00 0x2191c0 0x1e8480 0x13d620 0xb71b0 0xaae60>;
+						qcom,thermal-fcc-qc3-classb-cp = <0x493e00 0x47b760 0x4630c0 0x44aa20 0x432380 0x401640 0x401640 0x401640 0x3d0900 0x36ee80 0x33e140 0x30d400 0x2dc6c0 0x2191c0 0xf4240 0xaae60>;
+						qcom,thermal-mitigation-pd-base = <0x3d0900 0x36ee80 0x30d400 0x2ab980 0x2ab980 0x2ab980 0x2ab980 0x2ab980 0x2ab980 0x249f00 0x249f00 0x1e8480 0x186a00 0x13d620 0xf4240 0x7a120>;
+						qcom,thermal-fcc-pps-cp = <0x7a1200 0x7270e0 0x6acfc0 0x632ea0 0x5b8d80 0x53ec60 0x4c4b40 0x44aa20 0x3d0900 0x3567e0 0x2dc6c0 0x2dc6c0 0x2dc6c0 0x1e8480 0x16e360 0x186a0>;
+						qcom,thermal-mitigation-dc = <0x2f4d60 0x2191c0 0x1b7740 0x186a00 0x155cc0 0x124f80 0x10c8e0 0xf4240 0xdbba0 0xc3500 0xaae60 0x927c0 0x7a120 0x61a80 0x493e0 0x30d40>;
+						qcom,thermal-mitigation-epp = <0x124f80 0x124f80 0x124f80 0x10c8e0 0x10c8e0 0xf4240 0xf4240 0xf4240 0xdbba0 0xaae60 0xaae60 0x927c0 0x7a120 0x61a80 0x493e0 0x30d40>;
+						qcom,thermal-mitigation-bpp-qc3 = <0x155cc0 0x13d620 0x124f80 0x124f80 0x10c8e0 0xf4240 0xdbba0 0xc3500 0xaae60 0xaae60 0xaae60 0x927c0 0x7a120 0x61a80 0x493e0 0x30d40>;
+						qcom,thermal-mitigation-bpp-qc2 = <0x10c8e0 0x10c8e0 0x10c8e0 0x10c8e0 0x10c8e0 0xf4240 0xf4240 0xf4240 0xaae60 0xaae60 0xaae60 0x927c0 0x7a120 0x61a80 0x493e0 0x30d40>;
+						qcom,thermal-mitigation-bpp = <0xaae60 0xaae60 0xaae60 0xaae60 0xaae60 0xaae60 0xaae60 0xaae60 0xaae60 0x927c0 0x927c0 0x7a120 0x61a80 0x493e0 0x30d40 0x30d40>;
+						qcom,thermal-mitigation-dc-20w = <0x2191c0 0x155cc0 0x13d620 0x124f80 0xaae60 0x927c0 0x7a120 0x61a80 0x61a80 0x61a80 0x61a80 0x61a80 0x61a80 0x61a80 0x61a80 0x61a80>;
+						qcom,distinguish-qc-class-ab;
+						qcom,support-wireless;
+						qcom,support-conn-therm;
+						qcom,support-ext-fg;
+	
+						qcom,chgr@1000 {
+							reg = <0x1000 0x100>;
+							interrupts = <0x02 0x10 0x00 0x01 0x02 0x10 0x01 0x01 0x02 0x10 0x02 0x01 0x02 0x10 0x03 0x01 0x02 0x10 0x04 0x01 0x02 0x10 0x06 0x03 0x02 0x10 0x07 0x03>;
+							interrupt-names = "chgr-error", "chg-state-change", "step-chg-state-change", "step-chg-soc-update-fail", "step-chg-soc-update-req", "vph-alarm", "vph-drop-prechg";
+						};
+	
+						qcom,dcdc@1100 {
+							reg = <0x1100 0x100>;
+							interrupts = <0x02 0x11 0x00 0x03 0x02 0x11 0x01 0x03 0x02 0x11 0x02 0x03 0x02 0x11 0x04 0x03 0x02 0x11 0x05 0x03 0x02 0x11 0x06 0x03 0x02 0x11 0x07 0x03>;
+							interrupt-names = "otg-fail", "otg-oc-disable-sw", "otg-oc-hiccup", "high-duty-cycle", "input-current-limiting", "concurrent-mode-disable", "switcher-power-ok";
+						};
+	
+						qcom,batif@1200 {
+							reg = <0x1200 0x100>;
+							interrupts = <0x02 0x12 0x00 0x01 0x02 0x12 0x02 0x03 0x02 0x12 0x03 0x03 0x02 0x12 0x04 0x03 0x02 0x12 0x05 0x03 0x02 0x12 0x06 0x03 0x02 0x12 0x07 0x03>;
+							interrupt-names = "bat-temp", "bat-ov", "bat-low", "bat-therm-or-id-missing", "bat-terminal-missing", "buck-oc", "vph-ov";
+						};
+	
+						qcom,usb@1300 {
+							reg = <0x1300 0x100>;
+							interrupts = <0x02 0x13 0x00 0x03 0x02 0x13 0x01 0x03 0x02 0x13 0x02 0x03 0x02 0x13 0x03 0x03 0x02 0x13 0x04 0x03 0x02 0x13 0x05 0x03 0x02 0x13 0x06 0x01 0x02 0x13 0x07 0x01>;
+							interrupt-names = "usbin-collapse", "usbin-vashdn", "usbin-uv", "usbin-ov", "usbin-plugin", "usbin-revi-change", "usbin-src-change", "usbin-icl-change";
+						};
+	
+						qcom,dc@1400 {
+							reg = <0x1400 0x100>;
+							interrupts = <0x02 0x14 0x01 0x03 0x02 0x14 0x02 0x03 0x02 0x14 0x03 0x03 0x02 0x14 0x04 0x03 0x02 0x14 0x05 0x03 0x02 0x14 0x06 0x03 0x02 0x14 0x07 0x03>;
+							interrupt-names = "dcin-vashdn", "dcin-uv", "dcin-ov", "dcin-plugin", "dcin-revi", "dcin-pon", "dcin-en";
+						};
+	
+						qcom,typec@1500 {
+							reg = <0x1500 0x100>;
+							interrupts = <0x02 0x15 0x00 0x01 0x02 0x15 0x01 0x03 0x02 0x15 0x02 0x01 0x02 0x15 0x03 0x03 0x02 0x15 0x04 0x01 0x02 0x15 0x05 0x01 0x02 0x15 0x06 0x03 0x02 0x15 0x07 0x01>;
+							interrupt-names = "typec-or-rid-detect-change", "typec-vpd-detect", "typec-cc-state-change", "typec-vconn-oc", "typec-vbus-change", "typec-attach-detach", "typec-legacy-cable-detect", "typec-try-snk-src-detect";
+						};
+	
+						qcom,misc@1600 {
+							reg = <0x1600 0x100>;
+							interrupts = <0x02 0x16 0x00 0x01 0x02 0x16 0x01 0x01 0x02 0x16 0x02 0x03 0x02 0x16 0x03 0x03 0x02 0x16 0x04 0x03 0x02 0x16 0x06 0x03 0x02 0x16 0x07 0x03>;
+							interrupt-names = "wdog-snarl", "wdog-bark", "aicl-fail", "aicl-done", "smb-en", "temp-change", "temp-change-smb";
+						};
+	
+						qcom,smb5-vconn {
+							regulator-name = "smb5-vconn";
+						};
+	
+						qcom,smb5-vbus {
+							regulator-name = "smb5-vbus";
+						};
+					};
+};
+
+&{/} {
+
+			qcom,battery-data {
+				qcom,batt-id-range-pct = <0x0f>;
+	
+				qcom,scud {
+					qcom,profile-revision = <0x18>;
+					qcom,fastchg-current-ma = <0x1f40>;
+					qcom,jeita-fcc-ranges = <0x00 0x32 0x1dc130 0x33 0x64 0x1dc130 0x65 0x96 0x476940 0x97 0x1c2 0x7a1200 0x1c3 0x244 0x1dc130>;
+					qcom,jeita-fv-ranges = <0x00 0x32 0x445c00 0x33 0x64 0x445c00 0x65 0x96 0x445c00 0x97 0x1c2 0x445c00 0x1c3 0x244 0x3e8fa0>;
+					qcom,step-chg-ranges = <0x2dcaa8 0x40d5a8 0x7a1200 0x40d990 0x425c48 0x594390 0x426030 0x431f98 0x4d5cb0 0x432380 0x43e6d0 0x4d5cb0 0x43eab8 0x445c00 0x3b8260>;
+					qcom,jeita-too-hot = <0x244>;
+					qcom,jeita-too-cold = <0x00>;
+					qcom,ocv-based-step-chg;
+					qcom,max-voltage-uv = "", "D\\";
+					qcom,fg-cc-cv-threshold-mv = <0x118a>;
+					qcom,nom-batt-capacity-mah = <0xce4>;
+					qcom,batt-id-kohm = <0x44>;
+					qcom,battery-beta = <0x109a>;
+					qcom,therm-room-temp = <0x186a0>;
+					qcom,battery-type = "f1_atl";
+					qcom,therm-coefficients = <0x2318 0xd0c 0xdaf7 0xc556 0x848d>;
+					qcom,therm-center-offset = <0x70>;
+					qcom,therm-pull-up = <0x64>;
+					qcom,rslow-normal-coeffs = <0x85 0x01 0x71 0x13>;
+					qcom,rslow-low-coeffs = <0xc6 0x15 0x65 0x02>;
+					qcom,checksum = <0xbe6a>;
+					qcom,gui-version = "PM855GUI - 1.0.0.10";
+					qcom,fg-profile-data = <0xa91f09ea 0x30d4f1da 0x38d50000 0x5abd858a 0xfa877fa4 0x75920681 0x1bfc8501 0x711339fc 0x8601ce1f 0x320a5deb 0xdaedb1d4 0x2d0a69d4 0x27bde81a 0xabfb8fba 0x60004efc 0x47fd44f4 0x33333010 0x350b4300 0x40014300 0x43006000 0x37003c00 0x46004000 0x39007600 0x5c644600 0x3f003d08 0x60004c00 0x49005710 0x4d104700 0x86285e48 0x4f60460d 0x4e00d8f8 0xfe1f0c0d 0xd4fa1706 0x891c320b 0xc50d672a 0x18178542 0x1e5d4502 0x6c10361f 0x904310a 0x25fddd1c 0x502a305 0xbe023f17 0x1c220544 0x91527012 0x601fdee5 0x4dcae9a4 0xe51c7dc9 0x8c0508bb 0x1c17d98b 0xbf84bf93 0x83a00980 0xd3030105 0x21fc8dfa 0xf859d5 0xffeaf607 0xddf310cd 0x921816f0 0x2fd72602 0x57052b02 0xce013200 0x15032803 0xd9054407 0x43029404 0x55038f05 0x51034900 0x3a004200 0x43644800 0x4c004208 0x49004a00 0x49003b10 0x3a103a00 0x4a204c48 0x5658640e 0x42004d00 0x58086100 0x50003f00 0x3f104f10 0x4c005b20 0x6d404858 0x540f5900 0x50003108 0xd8009f20 0xc904f10a 0xed0dd71c 0x1923f545 0x17527118 0xd603fa05 0xf6027312 0x3f0adc1f 0x6d05a402 0x1c06c01c 0xe03ec05 0x44027a18 0x81038e04 0x5b026a00 0x2d200305 0xfc02c305 0xe31c1c02 0xba058002 0x9218ef02 0x9005cd02 0x7c003b01 0xc000fa00 0xbb0c0000>;
+				};
+	
+				qcom,coslight {
+					qcom,profile-revision = <0x18>;
+					qcom,fastchg-current-ma = <0x1f40>;
+					qcom,jeita-fcc-ranges = <0x00 0x32 0x1dc130 0x33 0x64 0x1dc130 0x65 0x96 0x4a2860 0x97 0x1c2 0x7a1200 0x1c3 0x244 0x1dc130>;
+					qcom,jeita-fv-ranges = <0x00 0x32 0x445c00 0x33 0x64 0x445c00 0x65 0x96 0x445c00 0x97 0x1c2 0x445c00 0x1c3 0x244 0x3e8fa0>;
+					qcom,step-chg-ranges = <0x2dcaa8 0x40d5a8 0x7a1200 0x40d990 0x425c48 0x594390 0x426030 0x431f98 0x4d5cb0 0x432380 0x43e6d0 0x4d5cb0 0x43eab8 0x445c00 0x3b8260>;
+					qcom,jeita-too-hot = <0x244>;
+					qcom,jeita-too-cold = <0x00>;
+					qcom,ocv-based-step-chg;
+					qcom,max-voltage-uv = "", "D\\";
+					qcom,fg-cc-cv-threshold-mv = <0x118a>;
+					qcom,nom-batt-capacity-mah = <0xce4>;
+					qcom,batt-id-kohm = <0x64>;
+					qcom,battery-beta = <0x109a>;
+					qcom,therm-room-temp = <0x186a0>;
+					qcom,battery-type = "f1_cos";
+					qcom,therm-coefficients = <0x2318 0xd0c 0xdaf7 0xc556 0x848d>;
+					qcom,therm-center-offset = <0x70>;
+					qcom,therm-pull-up = <0x64>;
+					qcom,rslow-normal-coeffs = <0xe4 0x04 0x3a 0x12>;
+					qcom,rslow-low-coeffs = <0x21 0x15 0x15 0x06>;
+					qcom,checksum = <0xc822>;
+					qcom,gui-version = "PM855GUI - 1.0.0.10";
+					qcom,fg-profile-data = <0xa91f6cea 0x8fe533ea 0x8ce50000 0xc4bcac8a 0xfc87ec82 0x71871080 0x20fce404 0x3a12c904 0xf02ce1f 0x320afbeb 0x65ed6edc 0xf60afadc 0x38c53a12 0x8402d1d3 0x600036fc 0x3dfd3ef4 0x38333010 0x330b3700 0x3f014700 0x4d006000 0x36003b00 0x3d003800 0x35006a00 0x4d644200 0x3ff84200 0x60f05500 0x5e008408 0x64085d00 0xbb207d40 0x67586010 0x6c00d8f8 0x51fef04 0x76eb6a04 0xd21c6d0a 0xf90c5e2b 0x9618554b 0xcd5c2002 0x6a0f861e 0xe305a802 0x4204c51c 0x78029c04 0xfd03ac17 0x1e22d045 0x195b5f11 0xab1ec3ee 0xfcca59c7 0xde1ca1c9 0xe404aabb 0x9217d893 0x788437a2 0x78a00980 0x46028204 0x6605fffb 0xf868dc 0x6eaf3ff 0x77e3fac4 0x15181600 0xee7fe02 0xf305cb02 0xce013200 0x1503ca02 0xd1055b03 0x2704f403 0x9d039402 0xd2055400 0x3f004000 0x44644700 0x46e847f8 0x49e84800 0x4a004510 0x4f103e00 0x49284b48 0x5358620d 0x40004ef8 0x520058f8 0x4d004700 0x43105410 0x52006628 0x7e484d60 0x5d0d5e00 0x50f83600 0xd8f0a71e 0x12046f0a 0x870ae31c 0x4323a745 0x955a8c18 0x802b305 0x9e035a10 0x3f0a6b1f 0x3304e703 0xd705b61c 0x4b03a705 0x92026d18 0x15028d05 0x26400 0x51fef04 0x76036a04 0xd21c6d02 0xf9045e03 0x96185503 0xcd042002 0x6a005601 0xc000fa00 0xf00c0000>;
+				};
+	
+				qcom,alium_860_89032_0000_3600mah_averaged_masterslave_sep24th2018 {
+					qcom,max-voltage-uv = <0x432380>;
+					qcom,fastchg-current-ma = <0x12c0>;
+					qcom,jeita-fcc-ranges = <0x00 0x32 0x493e0 0x33 0x64 0x186a00 0x65 0x96 0x30d400 0x97 0x1c2 0x493e00 0x1c3 0x244 0x186a00>;
+					qcom,jeita-fv-ranges = <0x00 0x32 0x432380 0x33 0x64 0x432380 0x65 0x96 0x432380 0x97 0x1c2 0x432380 0x1c3 0x244 0x3e8fa0>;
+					qcom,step-chg-ranges = <0x36ee80 0x401640 0x2dc6c0 0x401a28 0x419ce0 0x2dc6c0 0x41a0c8 0x423920 0x2625a0>;
+					qcom,nom-batt-capacity-mah = <0xce4>;
+					qcom,batt-id-kohm = <0x12c>;
+					qcom,ocv-based-step-chg;
+					qcom,battery-beta = <0x109a>;
+					qcom,therm-room-temp = <0x186a0>;
+					qcom,fg-cc-cv-threshold-mv = <0x1126>;
+					qcom,battery-type = "itech_3000mah";
+					qcom,therm-coefficients = <0x2318 0xd0c 0xdaf7 0xc556 0x848d>;
+					qcom,therm-center-offset = <0x70>;
+					qcom,therm-pull-up = <0x64>;
+					qcom,rslow-normal-coeffs = <0xdf 0x02 0x77 0x1a>;
+					qcom,rslow-low-coeffs = <0x51 0x04 0xd0 0x13>;
+					qcom,checksum = <0x1538>;
+					qcom,gui-version = "PM855GUI - 1.0.0.10";
+					qcom,fg-profile-data = <0x900c7ea 0xc4dc8ee2 0x3add0000 0x15bca58a 0x280d192 0xab9d4780 0x1000df02 0x771a85ec 0xe1fdce07 0x320075eb 0xaaedf3cd 0xc0a7ae4 0xedc5401b 0xd0021fca 0xff005200 0x4d004a00 0x3c003500 0x38003900 0x48004300 0x3f00ff00 0x38004000 0x46005000 0x45005c00 0x7e646000 0x50085010 0xff006a00 0x5f006300 0x6e006000 0x7d209640 0x75506b13 0x6300d800 0x14227e0d 0x2102aa04 0xed1cd409 0x640cd323 0xa418d342 0xb5559102 0x90122a1f 0x2061f0a 0xa306ae1c 0x8d029604 0xd203d117 0x51233f45 0x28536914 0x93208eec 0x18cbc8c5 0xdb1c7bc9 0x7c05e6c2 0xb9172c93 0x8785a292 0x91a80980 0x92f21a0d 0xf4fc5eeb 0xf8fbed 0x15e2f60f 0x75027205 0x49011000 0xfae5e203 0x8d058502 0xce073200 0x23034602 0x9c040302 0x48070a00 0xba039702 0x65055000 0x3a004100 0x43644500 0x45104518 0x46084400 0x47003a08 0x4b083700 0x47204e40 0x54586010 0x57005f00 0x57085500 0x4b005000 0x3e085208 0x52005c20 0x6f407d58 0x67106300 0x69084f10 0xd8008c2a 0xdb042802 0xad040b1d 0x5022a745 0xd52a218 0x7403ad04 0x3502ae13 0x3f0a5a20 0xdd04f102 0xd805c71c 0xdd023d04 0xeb039718 0x5203d504 0x19027200 0x14227e05 0x2102aa04 0xed1cd401 0x6404d303 0xa418d302 0xb5059102 0x90007c01 0xc000fa00 0x40e0000>;
+				};
+			};
+};
+

@@ -6,6 +6,7 @@
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include "qcomtee.h"
+#include <linux/of.h>
 
 #define QCOMTEE_ASYNC_VERSION_1_0 0x00010000U /* Maj: 0x0001, Min: 0x0000. */
 #define QCOMTEE_ASYNC_VERSION_1_1 0x00010001U /* Maj: 0x0001, Min: 0x0001. */
@@ -147,10 +148,22 @@ void qcomtee_fetch_async_reqs(struct qcomtee_object_invoke_ctx *oic)
 			goto out;
 
 		major_ver = QCOMTEE_ASYNC_VERSION_MAJOR(async_msg->version);
-		/* Major version mismatch is a compatibility break. */
+		/*
+		 * Major version mismatch is a compatibility break for the
+		 * asynchronous protocol. Devices that do not implement async
+		 * messages (e.g. crux/sm8150 QTEE firmware) advertise an older
+		 * major version; unsupported async operations are silently
+		 * skipped instead of being reported as errors.
+		 */
 		if (major_ver != QCOMTEE_ASYNC_VERSION_CURRENT_MAJOR) {
-			pr_err("Async message version mismatch (%u != %u)\n",
-			       major_ver, QCOMTEE_ASYNC_VERSION_CURRENT_MAJOR);
+			if (of_machine_is_compatible("xiaomi,crux") ||
+			    of_machine_is_compatible("qcom,sm8150"))
+				pr_info_once("async protocol v%u.%u unsupported by device, skipping\n",
+					     major_ver,
+					     QCOMTEE_ASYNC_VERSION_MINOR(async_msg->version));
+			else
+				pr_debug("Async message version mismatch (%u != %u), skipping\n",
+					 major_ver, QCOMTEE_ASYNC_VERSION_CURRENT_MAJOR);
 
 			goto out;
 		}

@@ -228,22 +228,15 @@ static int __fill_rpmh_msg(struct rpmh_request *req, enum rpmh_state state,
  */
 int rpmh_read(const struct device *dev, struct tcs_cmd *cmd)
 {
-	DECLARE_COMPLETION_ONSTACK(compl);
-	DEFINE_RPMH_MSG_ONSTACK(dev, RPMH_ACTIVE_ONLY_STATE, &compl, rpm_msg);
-	int ret;
+	/*
+	 * [crux] 7.3 新加的读通道（MSGID 不带 WRITE 位、结果走 RSC RESP_DATA）
+	 * 在本机 RSC 上表现异常：读回全 0，个别地址永远不完成，且之后整个 RSC
+	 * 的请求全部 10s 超时（表现为 ldo1 读电压 -110、AMC 投票 -110、系统卡死）。
+	 * 6.17 从来不发读请求（regulator 只读自己的缓存），本机照 6.17 处理：
+	 * 直接报不支持，不向硬件发读操作。
+	 */
 
-	ret = __fill_rpmh_msg(&rpm_msg, RPMH_ACTIVE_ONLY_STATE, cmd, 1, true);
-	if (ret)
-		return ret;
-
-	ret = __rpmh_write(dev, RPMH_ACTIVE_ONLY_STATE, &rpm_msg);
-	if (ret)
-		return ret;
-
-	ret = wait_for_completion_timeout(&compl, RPMH_TIMEOUT_MS);
-	cmd[0].data = rpm_msg.cmd[0].data;
-
-	return (ret > 0) ? 0 : -ETIMEDOUT;
+	return -EOPNOTSUPP;
 }
 EXPORT_SYMBOL_GPL(rpmh_read);
 

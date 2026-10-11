@@ -8,6 +8,9 @@
 #include "iris_instance.h"
 #include "iris_vpu_buffer.h"
 
+#include <linux/soc/qcom/llcc-qcom.h>
+#include <media/v4l2-mem2mem.h>
+
 static u32 iris_hfi_gen1_buf_type_from_driver(enum iris_buffer_type buffer_type)
 {
 	switch (buffer_type) {
@@ -53,7 +56,8 @@ static int iris_hfi_gen1_sys_image_version(struct iris_core *core)
 	return iris_hfi_queue_cmd_write_locked(core, &packet, packet.hdr.size);
 }
 
-static int iris_hfi_gen1_sys_interframe_powercollapse(struct iris_core *core)
+static int iris_hfi_gen1_sys_power_control(struct iris_core *core, bool enable,
+					   bool core_locked)
 {
 	struct hfi_sys_set_property_pkt *pkt;
 	struct hfi_enable *hfi;
@@ -71,12 +75,113 @@ static int iris_hfi_gen1_sys_interframe_powercollapse(struct iris_core *core)
 	pkt->hdr.pkt_type = HFI_CMD_SYS_SET_PROPERTY;
 	pkt->num_properties = 1;
 	pkt->data[0] = HFI_PROPERTY_SYS_CODEC_POWER_PLANE_CTRL;
-	hfi->enable = true;
+	hfi->enable = enable;
 
-	ret = iris_hfi_queue_cmd_write_locked(core, pkt, pkt->hdr.size);
+	if (core_locked)
+		ret = iris_hfi_queue_cmd_write_locked(core, pkt, pkt->hdr.size);
+	else
+		ret = iris_hfi_queue_cmd_write(core, pkt, pkt->hdr.size);
 	kfree(pkt);
 
 	return ret;
+}
+
+static int iris_hfi_gen1_sys_debug_config(struct iris_core *core)
+{
+	struct hfi_sys_set_property_pkt *pkt;
+	struct hfi_debug_config *config;
+	u32 packet_size;
+	int ret;
+
+	packet_size = struct_size(pkt, data, 1) + sizeof(*config);
+	pkt = kzalloc(packet_size, GFP_KERNEL);
+	if (!pkt)
+		return -ENOMEM;
+
+	config = (struct hfi_debug_config *)&pkt->data[1];
+	pkt->hdr.size = packet_size;
+	pkt->hdr.pkt_type = HFI_CMD_SYS_SET_PROPERTY;
+	pkt->num_properties = 1;
+	pkt->data[0] = HFI_PROPERTY_SYS_DEBUG_CONFIG;
+	config->debug_config = HFI_DEBUG_MSG_ERROR | HFI_DEBUG_MSG_FATAL;
+	config->debug_mode = HFI_DEBUG_MODE_QUEUE;
+
+	ret = iris_hfi_queue_cmd_write(core, pkt, packet_size);
+	kfree(pkt);
+
+	return ret;
+}
+
+static int iris_hfi_gen1_syscache_config(struct iris_core *core)
+{
+	static const u32 usecase_ids[] = { LLCC_VIDSC0, LLCC_VIDSC1 };
+	struct hfi_sys_set_resource_pkt *pkt;
+	u32 packet_size, i;
+	int ret;
+
+	if (core->syscache_set)
+		return 0;
+
+	for (i = 0; i < ARRAY_SIZE(usecase_ids); i++) {
+		core->llcc_slices[i] = llcc_slice_getd(usecase_ids[i]);
+		if (IS_ERR(core->llcc_slices[i])) {
+			ret = PTR_ERR(core->llcc_slices[i]);
+			core->llcc_slices[i] = NULL;
+			goto error_put;
+		}
+	}
+
+	for (i = 0; i < ARRAY_SIZE(usecase_ids); i++) {
+		ret = llcc_slice_activate(core->llcc_slices[i]);
+		if (ret)
+			goto error_deactivate;
+	}
+	core->llcc_active = true;
+
+	packet_size = struct_size(pkt, data, 5);
+	pkt = kzalloc(packet_size, GFP_KERNEL);
+	if (!pkt) {
+		ret = -ENOMEM;
+		goto error_deactivate;
+	}
+
+	pkt->hdr.size = packet_size;
+	pkt->hdr.pkt_type = HFI_CMD_SYS_SET_RESOURCE;
+	pkt->resource_handle = 1;
+	pkt->resource_type = HFI_RESOURCE_SYSCACHE;
+	pkt->data[0] = ARRAY_SIZE(usecase_ids);
+	for (i = 0; i < ARRAY_SIZE(usecase_ids); i++) {
+		pkt->data[1 + i * 2] = llcc_get_slice_size(core->llcc_slices[i]);
+		pkt->data[2 + i * 2] = llcc_get_slice_id(core->llcc_slices[i]);
+	}
+
+	ret = iris_hfi_queue_cmd_write(core, pkt, packet_size);
+	kfree(pkt);
+	if (ret)
+		goto error_deactivate;
+
+	core->syscache_set = true;
+	return 0;
+
+error_deactivate:
+	while (i--)
+		llcc_slice_deactivate(core->llcc_slices[i]);
+	core->llcc_active = false;
+error_put:
+	for (i = 0; i < ARRAY_SIZE(usecase_ids); i++) {
+		if (core->llcc_slices[i])
+			llcc_slice_putd(core->llcc_slices[i]);
+		core->llcc_slices[i] = NULL;
+	}
+
+	return ret;
+}
+
+static int iris_hfi_gen1_sys_interframe_powercollapse(struct iris_core *core)
+{
+	return iris_hfi_gen1_sys_power_control(core,
+					     !core->iris_platform_data->legacy_vpu5,
+					     true);
 }
 
 static int iris_hfi_gen1_sys_pc_prep(struct iris_core *core)
@@ -97,6 +202,20 @@ static int iris_hfi_gen1_session_open(struct iris_inst *inst)
 
 	if (inst->state != IRIS_INST_DEINIT)
 		return -EALREADY;
+
+	if (inst->core->iris_platform_data->legacy_vpu5) {
+		ret = iris_hfi_gen1_sys_debug_config(inst->core);
+		if (ret)
+			return ret;
+
+		ret = iris_hfi_gen1_syscache_config(inst->core);
+		if (ret)
+			return ret;
+
+		ret = iris_hfi_gen1_sys_power_control(inst->core, false, false);
+		if (ret)
+			return ret;
+	}
 
 	switch (inst->codec) {
 	case V4L2_PIX_FMT_H264:
@@ -143,6 +262,7 @@ static int iris_hfi_gen1_session_close(struct iris_inst *inst)
 {
 	struct hfi_session_pkt packet;
 
+	inst->hfi_core_id = 0;
 	iris_hfi_gen1_packet_session_cmd(inst, &packet, HFI_CMD_SYS_SESSION_END);
 
 	return iris_hfi_queue_cmd_write(inst->core, &packet, packet.shdr.hdr.size);
@@ -333,6 +453,15 @@ static int iris_hfi_gen1_queue_output_buffer(struct iris_inst *inst, struct iris
 	else
 		op_pkt.stream_id = 0;
 
+	/*
+	 * Downstream msm_vidc points legacy split-mode output FTBs at the byte
+	 * immediately following the image even when the firmware reports a zero
+	 * extradata size.  Iris1 validates that pointer independently of the size.
+	 */
+	if (inst->core->iris_platform_data->legacy_vpu5 &&
+	    inst->codec == V4L2_PIX_FMT_VP9)
+		op_pkt.extradata_buffer = buf->device_addr + buf->buffer_size;
+
 	return iris_hfi_queue_cmd_write(inst->core, &op_pkt, op_pkt.shdr.hdr.size);
 }
 
@@ -518,20 +647,10 @@ iris_hfi_gen1_packet_session_set_property(struct hfi_session_set_property_pkt *p
 		break;
 	}
 	case HFI_PROPERTY_PARAM_UNCOMPRESSED_PLANE_ACTUAL_CONSTRAINTS_INFO: {
+		struct hfi_uncompressed_plane_actual_constraints_info *in = pdata;
 		struct hfi_uncompressed_plane_actual_constraints_info *info = prop_data;
 
-		info->buffer_type = HFI_BUFFER_OUTPUT2;
-		info->num_planes = 2;
-		info->plane_format[0].stride_multiples = 128;
-		info->plane_format[0].max_stride = 8192;
-		info->plane_format[0].min_plane_buffer_height_multiple = 32;
-		info->plane_format[0].buffer_alignment = 256;
-		if (info->num_planes > 1) {
-			info->plane_format[1].stride_multiples = 128;
-			info->plane_format[1].max_stride = 8192;
-			info->plane_format[1].min_plane_buffer_height_multiple = 16;
-			info->plane_format[1].buffer_alignment = 256;
-		}
+		*info = *in;
 
 		packet->shdr.hdr.size += sizeof(*info);
 		break;
@@ -553,6 +672,17 @@ iris_hfi_gen1_packet_session_set_property(struct hfi_session_set_property_pkt *p
 		multi->buffer_type = in->buffer_type;
 		multi->enable = in->enable;
 		packet->shdr.hdr.size += sizeof(*multi);
+		break;
+	}
+	case HFI_PROPERTY_PARAM_VDEC_OUTPUT_ORDER: {
+		u32 *order = pdata;
+
+		if (*order != HFI_OUTPUT_ORDER_DECODE &&
+		    *order != HFI_OUTPUT_ORDER_DISPLAY)
+			return -EINVAL;
+
+		packet->data[1] = *order;
+		packet->shdr.hdr.size += sizeof(u32);
 		break;
 	}
 	case HFI_PROPERTY_PARAM_BUFFER_SIZE_ACTUAL: {
@@ -815,11 +945,60 @@ static int iris_hfi_gen1_set_resolution(struct iris_inst *inst, u32 plane)
 static int iris_hfi_gen1_decide_core(struct iris_inst *inst, u32 plane)
 {
 	const u32 ptype = HFI_PROPERTY_CONFIG_VIDEOCORES_USAGE;
+	struct iris_core *core = inst->core;
 	struct hfi_videocores_usage_type cu;
+	struct iris_inst *instance;
+	u64 core1_load = 0;
+	u64 core2_load = 0;
+	bool new_assignment = false;
+	u32 fps;
+	int ret;
 
-	cu.video_core_enable_mask = HFI_CORE_ID_1;
+	mutex_lock(&core->lock);
+	if (!inst->hfi_core_id) {
+		list_for_each_entry(instance, &core->instances, list) {
+			if (instance == inst || instance->domain != DECODER ||
+			    instance->state == IRIS_INST_DEINIT ||
+			    instance->state == IRIS_INST_ERROR)
+				continue;
 
-	return hfi_gen1_set_property(inst, ptype, &cu, sizeof(cu));
+			fps = max(instance->frame_rate, instance->operating_rate);
+			if (fps == MAXIMUM_FPS)
+				fps = DEFAULT_FPS;
+			fps = max(fps, 1U);
+			if (instance->hfi_core_id == HFI_CORE_ID_1)
+				core1_load += (u64)iris_get_mbpf(instance) * fps;
+			else if (instance->hfi_core_id == HFI_CORE_ID_2)
+				core2_load += (u64)iris_get_mbpf(instance) * fps;
+		}
+
+		if (core->iris_platform_data->legacy_vpu5 &&
+		    core->iris_platform_data->num_vpp_pipe > 1 &&
+		    core1_load > core2_load)
+			inst->hfi_core_id = HFI_CORE_ID_2;
+		else
+			inst->hfi_core_id = HFI_CORE_ID_1;
+		new_assignment = true;
+	}
+	cu.video_core_enable_mask = inst->hfi_core_id;
+	mutex_unlock(&core->lock);
+
+	ret = hfi_gen1_set_property(inst, ptype, &cu, sizeof(cu));
+	if (ret && new_assignment) {
+		mutex_lock(&core->lock);
+		if (inst->hfi_core_id == cu.video_core_enable_mask)
+			inst->hfi_core_id = 0;
+		mutex_unlock(&core->lock);
+		return ret;
+	}
+
+	if (core->iris_platform_data->legacy_vpu5)
+		dev_info(core->dev,
+			 "Iris1: decoder codec=%p4cc assigned core=%u (loads %llu/%llu)\n",
+			 &inst->codec, cu.video_core_enable_mask,
+			 core1_load, core2_load);
+
+	return ret;
 }
 
 static int iris_hfi_gen1_set_raw_format(struct iris_inst *inst, u32 plane)
@@ -833,15 +1012,23 @@ static int iris_hfi_gen1_set_raw_format(struct iris_inst *inst, u32 plane)
 		pixelformat = inst->fmt_dst->fmt.pix_mp.pixelformat;
 		if (iris_split_mode_enabled(inst)) {
 			fmt.buffer_type = HFI_BUFFER_OUTPUT;
-			fmt.format = HFI_COLOR_FORMAT_NV12_UBWC;
+			if (inst->core->iris_platform_data->legacy_vpu5 &&
+			    pixelformat == V4L2_PIX_FMT_P010)
+				fmt.format = HFI_COLOR_FORMAT_YUV420_TP10_UBWC;
+			else
+				fmt.format = HFI_COLOR_FORMAT_NV12_UBWC;
 
 			ret = hfi_gen1_set_property(inst, ptype, &fmt, sizeof(fmt));
 			if (ret)
 				return ret;
 
 			fmt.buffer_type = HFI_BUFFER_OUTPUT2;
-			fmt.format = pixelformat == V4L2_PIX_FMT_NV12 ?
-				HFI_COLOR_FORMAT_NV12 : HFI_COLOR_FORMAT_NV12_UBWC;
+			if (inst->core->iris_platform_data->legacy_vpu5 &&
+			    pixelformat == V4L2_PIX_FMT_P010)
+				fmt.format = HFI_COLOR_FORMAT_P010;
+			else
+				fmt.format = pixelformat == V4L2_PIX_FMT_NV12 ?
+					HFI_COLOR_FORMAT_NV12 : HFI_COLOR_FORMAT_NV12_UBWC;
 
 			ret = hfi_gen1_set_property(inst, ptype, &fmt, sizeof(fmt));
 		} else {
@@ -866,18 +1053,22 @@ static int iris_hfi_gen1_set_format_constraints(struct iris_inst *inst, u32 plan
 {
 	const u32 ptype = HFI_PROPERTY_PARAM_UNCOMPRESSED_PLANE_ACTUAL_CONSTRAINTS_INFO;
 	struct hfi_uncompressed_plane_actual_constraints_info pconstraint;
+	u32 stride_multiple;
 
 	if (inst->fmt_dst->fmt.pix_mp.pixelformat == V4L2_PIX_FMT_QC08C)
 		return 0;
 
+	stride_multiple = inst->fmt_dst->fmt.pix_mp.pixelformat ==
+		V4L2_PIX_FMT_P010 ? 256 : 128;
+
 	pconstraint.buffer_type = HFI_BUFFER_OUTPUT2;
 	pconstraint.num_planes = 2;
-	pconstraint.plane_format[0].stride_multiples = 128;
+	pconstraint.plane_format[0].stride_multiples = stride_multiple;
 	pconstraint.plane_format[0].max_stride = 8192;
 	pconstraint.plane_format[0].min_plane_buffer_height_multiple = 32;
 	pconstraint.plane_format[0].buffer_alignment = 256;
 
-	pconstraint.plane_format[1].stride_multiples = 128;
+	pconstraint.plane_format[1].stride_multiples = stride_multiple;
 	pconstraint.plane_format[1].max_stride = 8192;
 	pconstraint.plane_format[1].min_plane_buffer_height_multiple = 16;
 	pconstraint.plane_format[1].buffer_alignment = 256;
@@ -889,11 +1080,29 @@ static int iris_hfi_gen1_set_num_bufs(struct iris_inst *inst, u32 plane)
 {
 	u32 ptype = HFI_PROPERTY_PARAM_BUFFER_COUNT_ACTUAL;
 	struct hfi_buffer_count_actual buf_count;
+	struct vb2_queue *src_q, *dst_q;
+	u32 input_count = VIDEO_MAX_FRAME;
+	u32 output_count = VIDEO_MAX_FRAME;
 	int ret;
 
+	/* Stateful decoders have no CAPTURE buffers before first source-change. */
+	if (inst->core->iris_platform_data->legacy_vpu5 &&
+	    inst->domain == ENCODER) {
+		src_q = v4l2_m2m_get_src_vq(inst->m2m_ctx);
+		dst_q = v4l2_m2m_get_dst_vq(inst->m2m_ctx);
+		input_count = vb2_get_num_buffers(src_q);
+		output_count = vb2_get_num_buffers(dst_q);
+		if (!input_count || !output_count) {
+			dev_err(inst->core->dev,
+				"Iris1: invalid VPU5 VB2 counts input=%u output=%u\n",
+				input_count, output_count);
+			return -EINVAL;
+		}
+	}
+
 	buf_count.type = HFI_BUFFER_INPUT;
-	buf_count.count_actual = VIDEO_MAX_FRAME;
-	buf_count.count_min_host = VIDEO_MAX_FRAME;
+	buf_count.count_actual = input_count;
+	buf_count.count_min_host = input_count;
 
 	ret = hfi_gen1_set_property(inst, ptype, &buf_count, sizeof(buf_count));
 	if (ret)
@@ -923,8 +1132,8 @@ static int iris_hfi_gen1_set_num_bufs(struct iris_inst *inst, u32 plane)
 		}
 	} else {
 		buf_count.type = HFI_BUFFER_OUTPUT;
-		buf_count.count_actual = VIDEO_MAX_FRAME;
-		buf_count.count_min_host = VIDEO_MAX_FRAME;
+		buf_count.count_actual = output_count;
+		buf_count.count_min_host = output_count;
 
 		ret = hfi_gen1_set_property(inst, ptype, &buf_count, sizeof(buf_count));
 	}
@@ -975,7 +1184,8 @@ static int iris_hfi_gen1_set_bufsize(struct iris_inst *inst, u32 plane)
 
 	if (iris_split_mode_enabled(inst)) {
 		bufsz.type = HFI_BUFFER_OUTPUT;
-		bufsz.size = inst->core->iris_firmware_desc->get_vpu_buffer_size(inst, BUF_DPB);
+		bufsz.size = inst->fw_buffer_sizes[BUF_DPB] ?:
+			inst->core->iris_firmware_desc->get_vpu_buffer_size(inst, BUF_DPB);
 
 		ret = hfi_gen1_set_property(inst, ptype, &bufsz, sizeof(bufsz));
 		if (ret)
@@ -1000,6 +1210,84 @@ static int iris_hfi_gen1_set_bufsize(struct iris_inst *inst, u32 plane)
 	}
 
 	return ret;
+}
+
+static int iris_hfi_gen1_get_buffer_requirements(struct iris_inst *inst)
+{
+	struct hfi_session_get_property_pkt packet = {
+		.shdr.hdr.size = sizeof(packet),
+		.shdr.hdr.pkt_type = HFI_CMD_SESSION_GET_PROPERTY,
+		.shdr.session_id = inst->session_id,
+		.num_properties = 1,
+		.data = HFI_PROPERTY_CONFIG_BUFFER_REQUIREMENTS,
+	};
+	int ret;
+
+	reinit_completion(&inst->completion);
+	ret = iris_hfi_queue_cmd_write(inst->core, &packet, packet.shdr.hdr.size);
+	if (ret)
+		return ret;
+
+	return iris_wait_for_session_response(inst, false);
+}
+
+static int iris_hfi_gen1_set_first_capture_config(struct iris_inst *inst)
+{
+	struct vb2_queue *dst_q = v4l2_m2m_get_dst_vq(inst->m2m_ctx);
+	const u32 count_ptype = HFI_PROPERTY_PARAM_BUFFER_COUNT_ACTUAL;
+	const u32 size_ptype = HFI_PROPERTY_PARAM_BUFFER_SIZE_ACTUAL;
+	const u32 frame_ptype = HFI_PROPERTY_PARAM_FRAME_SIZE;
+	struct hfi_buffer_count_actual count;
+	struct hfi_buffer_size_actual size;
+	struct hfi_framesize frame;
+	u32 dpb_count, output2_count;
+	int ret;
+
+	dpb_count = iris_vpu_buf_count(inst, BUF_DPB);
+	output2_count = vb2_get_num_buffers(dst_q);
+	if (!dpb_count || output2_count < dpb_count) {
+		dev_err(inst->core->dev,
+			"Iris1: invalid first capture counts: codec=%p4cc output2=%u dpb=%u\n",
+			&inst->codec, output2_count, dpb_count);
+		return -EINVAL;
+	}
+
+	ret = iris_hfi_gen1_get_buffer_requirements(inst);
+	if (ret)
+		return ret;
+
+	frame.buffer_type = HFI_BUFFER_OUTPUT2;
+	frame.width = inst->fmt_src->fmt.pix_mp.width;
+	frame.height = inst->fmt_src->fmt.pix_mp.height;
+	ret = hfi_gen1_set_property(inst, frame_ptype, &frame, sizeof(frame));
+	if (ret)
+		return ret;
+
+	count.type = HFI_BUFFER_OUTPUT2;
+	count.count_actual = output2_count;
+	count.count_min_host = output2_count;
+	ret = hfi_gen1_set_property(inst, count_ptype, &count, sizeof(count));
+	if (ret)
+		return ret;
+
+	size.type = HFI_BUFFER_OUTPUT2;
+	size.size = inst->buffers[BUF_OUTPUT].size;
+	ret = hfi_gen1_set_property(inst, size_ptype, &size, sizeof(size));
+	if (ret)
+		return ret;
+
+	size.type = HFI_BUFFER_OUTPUT;
+	size.size = inst->fw_buffer_sizes[BUF_DPB] ?:
+		inst->core->iris_firmware_desc->get_vpu_buffer_size(inst, BUF_DPB);
+	ret = hfi_gen1_set_property(inst, size_ptype, &size, sizeof(size));
+	if (ret)
+		return ret;
+
+	count.type = HFI_BUFFER_OUTPUT;
+	count.count_actual = dpb_count;
+	count.count_min_host = dpb_count;
+
+	return hfi_gen1_set_property(inst, count_ptype, &count, sizeof(count));
 }
 
 static int iris_hfi_gen1_set_frame_rate(struct iris_inst *inst, u32 plane)
@@ -1043,6 +1331,13 @@ static int iris_hfi_gen1_session_set_config_params(struct iris_inst *inst, u32 p
 	u32 config_params_size, i, j;
 	const u32 *config_params;
 	int ret;
+
+	if (core->iris_platform_data->legacy_vpu5 &&
+	    inst->domain == DECODER && V4L2_TYPE_IS_CAPTURE(plane) &&
+	    (inst->codec == V4L2_PIX_FMT_HEVC ||
+	     inst->codec == V4L2_PIX_FMT_VP9) &&
+	    inst->sub_state & IRIS_INST_SUB_FIRST_IPSC)
+		return iris_hfi_gen1_set_first_capture_config(inst);
 
 	static const struct iris_hfi_prop_type_handle vdec_prop_type_handle_inp_arr[] = {
 		{HFI_PROPERTY_PARAM_FRAME_SIZE,
@@ -1116,6 +1411,10 @@ static int iris_hfi_gen1_session_set_config_params(struct iris_inst *inst, u32 p
 			}
 		}
 	}
+
+	if (core->iris_platform_data->legacy_vpu5 &&
+	    V4L2_TYPE_IS_OUTPUT(plane))
+		return iris_hfi_gen1_get_buffer_requirements(inst);
 
 	return 0;
 }

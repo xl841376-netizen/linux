@@ -349,9 +349,36 @@ exit:
 	return ret;
 }
 
+static int __maybe_unused iris_system_suspend(struct device *dev)
+{
+	struct iris_core *core = dev_get_drvdata(dev);
+
+	/*
+	 * Runtime PM is forbidden on legacy VPU5 until its power-collapse
+	 * handshake is implemented.  pm_runtime_force_suspend() bypasses that
+	 * prohibition and would still call iris_pm_suspend(), whose prepare-PC
+	 * path intentionally returns -EAGAIN.  Firmware state is not retained
+	 * reliably across Nabu s2idle, so tear down an idle controller and let
+	 * the next open initialize it again.
+	 */
+	if (core->iris_platform_data->legacy_vpu5)
+		return iris_core_deinit_for_system_suspend(core);
+
+	return pm_runtime_force_suspend(dev);
+}
+
+static int __maybe_unused iris_system_resume(struct device *dev)
+{
+	struct iris_core *core = dev_get_drvdata(dev);
+
+	if (core->iris_platform_data->legacy_vpu5)
+		return 0;
+
+	return pm_runtime_force_resume(dev);
+}
+
 static const struct dev_pm_ops iris_pm_ops = {
-	SET_SYSTEM_SLEEP_PM_OPS(pm_runtime_force_suspend,
-				pm_runtime_force_resume)
+	SET_SYSTEM_SLEEP_PM_OPS(iris_system_suspend, iris_system_resume)
 	SET_RUNTIME_PM_OPS(iris_pm_suspend, iris_pm_resume, NULL)
 };
 
@@ -367,6 +394,10 @@ static const struct of_device_id iris_dt_match[] = {
 	{
 		.compatible = "qcom,sc7280-venus",
 		.data = &sc7280_data,
+	},
+	{
+		.compatible = "qcom,sm8150-iris",
+		.data = &sm8150_data,
 	},
 	{
 		.compatible = "qcom,sm8250-venus",

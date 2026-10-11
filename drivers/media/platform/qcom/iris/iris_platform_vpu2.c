@@ -41,6 +41,12 @@ static const struct iris_firmware_desc iris_vpu20_p4_gen1_desc = {
 	.fwname = "qcom/vpu/vpu20_p4.mbn",
 };
 
+static const struct iris_firmware_desc iris_sm8150_gen1_desc = {
+	.firmware_data = &iris_hfi_gen1_data,
+	.get_vpu_buffer_size = iris_vpu_buf_size,
+	.fwname = "qcom/sm8150/xiaomi/crux/venus.mbn",
+};
+
 static const u32 iris_fmts_vpu2_dec[] = {
 	[IRIS_FMT_H264] = V4L2_PIX_FMT_H264,
 	[IRIS_FMT_HEVC] = V4L2_PIX_FMT_HEVC,
@@ -59,6 +65,18 @@ static struct platform_inst_caps platform_inst_cap_vpu2 = {
 	.max_operating_rate = MAXIMUM_FPS,
 };
 
+static struct platform_inst_caps platform_inst_cap_sm8150 = {
+	.min_frame_width = 128,
+	.max_frame_width = 8192,
+	.min_frame_height = 128,
+	.max_frame_height = 8192,
+	.max_mbpf = 138240,
+	.mb_cycles_vsp = 10,
+	.mb_cycles_vpp = 200,
+	.max_frame_rate = MAXIMUM_FPS,
+	.max_operating_rate = MAXIMUM_FPS,
+};
+
 static const struct icc_info iris_icc_info_vpu2[] = {
 	{ "cpu-cfg",    1000, 1000     },
 	{ "video-mem",  1000, 15000000 },
@@ -66,7 +84,32 @@ static const struct icc_info iris_icc_info_vpu2[] = {
 
 static const char * const iris_clk_reset_table_vpu2[] = { "bus", "core" };
 
+static const char * const iris_clk_reset_table_sm8150[] = {
+	"bus", "core", "vcodec0_bus", "vcodec1_bus"
+};
+
 static const char * const iris_pmdomain_table_vpu2[] = { "venus", "vcodec0" };
+
+static const char * const iris_pmdomain_table_sm8150[] = {
+	"venus", "vcodec0", "vcodec1"
+};
+
+static const char * const iris_opp_pd_table_sm8150[] = { "cx" };
+
+static const struct platform_clk_data iris_clk_table_sm8150[] = {
+	{ IRIS_CTRL_CLK,    "core"          },
+	{ IRIS_AXI_CLK,     "iface"         },
+	{ IRIS_AHB_CLK,     "bus"           },
+	{ IRIS_HW_CLK,      "vcodec0_core"  },
+	{ IRIS_HW_AHB_CLK,  "vcodec0_bus"   },
+	{ IRIS_VPP0_HW_CLK, "vcodec1_core"  },
+	{ IRIS_BSE_HW_CLK,  "vcodec1_bus"   },
+};
+
+static const char * const iris_opp_clk_table_sm8150[] = {
+	"core",
+	NULL,
+};
 
 static const struct tz_cp_config tz_cp_config_vpu2[] = {
 	{
@@ -133,6 +176,36 @@ const struct iris_platform_data sc7280_data = {
 	.max_core_mbpf = 4096 * 2176 / 256 * 2 + 1920 * 1088 / 256,
 	/* max spec for SC7280 is 4096x2176@60fps */
 	.max_core_mbps = 4096 * 2176 / 256 * 60,
+};
+
+/* SM8150 uses HFI Gen1 with the older VIDEO.IR.1.2 (VPU5) register map. */
+const struct iris_platform_data sm8150_data = {
+	.firmware_desc_gen1 = &iris_sm8150_gen1_desc,
+	.vpu_ops = &iris_vpu2_ops,
+	.icc_tbl = iris_icc_info_vpu2,
+	.icc_tbl_size = ARRAY_SIZE(iris_icc_info_vpu2),
+	.clk_rst_tbl = iris_clk_reset_table_sm8150,
+	.clk_rst_tbl_size = ARRAY_SIZE(iris_clk_reset_table_sm8150),
+	.bw_tbl_dec = sm8250_bw_table_dec,
+	.bw_tbl_dec_size = ARRAY_SIZE(sm8250_bw_table_dec),
+	.pmdomain_tbl = iris_pmdomain_table_sm8150,
+	.pmdomain_tbl_size = ARRAY_SIZE(iris_pmdomain_table_sm8150),
+	.opp_pd_tbl = iris_opp_pd_table_sm8150,
+	.opp_pd_tbl_size = ARRAY_SIZE(iris_opp_pd_table_sm8150),
+	.clk_tbl = iris_clk_table_sm8150,
+	.clk_tbl_size = ARRAY_SIZE(iris_clk_table_sm8150),
+	.opp_clk_tbl = iris_opp_clk_table_sm8150,
+	.dma_mask = 0xe0000000 - 1,
+	.inst_iris_fmts = iris_fmts_vpu2_dec,
+	.inst_iris_fmts_size = ARRAY_SIZE(iris_fmts_vpu2_dec),
+	.inst_caps = &platform_inst_cap_sm8150,
+	.tz_cp_config_data = tz_cp_config_vpu2,
+	.tz_cp_config_data_size = ARRAY_SIZE(tz_cp_config_vpu2),
+	.num_vpp_pipe = 2,
+	.legacy_vpu5 = true,
+	.max_session_count = 16,
+	.max_core_mbpf = NUM_MBS_8K,
+	.max_core_mbps = ((3840 * 2176) / 256) * 120,
 };
 
 const struct iris_platform_data sm8250_data = {

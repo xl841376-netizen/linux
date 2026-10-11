@@ -6,6 +6,7 @@
 
 #include <linux/bitfield.h>
 #include <linux/debugfs.h>
+#include <linux/io.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/of.h>
@@ -338,6 +339,34 @@ static const struct file_operations cmd_db_debugfs_ops = {
 	.release = single_release,
 };
 
+static int crux_cmd_db_dynscan(void)
+{
+	/* [crux] 6.17 验证过的兜底：在 XBL AOP DDR 区扫 cmd-db magic
+	 * (0x0c0330db)，命中即以该处为 header。映射保持常驻，不 iounmap。
+	 */
+	void __iomem *q;
+	u32 v;
+	int i;
+
+	q = ioremap(0x85E00000, 0x140000);
+	if (!q) {
+		pr_err("cmd-db: [crux] dynscan ioremap failed\n");
+		return -ENOMEM;
+	}
+	for (i = 0; i + 4 <= 0x140000; i += 4) {
+		v = readl_relaxed(q + i);
+		if (v == 0x0c0330db) {
+			cmd_db_header = (struct cmd_db_header *)(q + i - 4);
+			pr_err("cmd-db: [crux] dynscan found magic at 0x%llx\n",
+			       0x85E00000ULL + i);
+			return 0;
+		}
+	}
+	pr_err("cmd-db: [crux] dynscan no magic in 0x85E00000-0x85F40000\n");
+	iounmap(q);
+	return -EINVAL;
+}
+
 static int cmd_db_dev_probe(struct platform_device *pdev)
 {
 	struct reserved_mem *rmem;
@@ -345,8 +374,8 @@ static int cmd_db_dev_probe(struct platform_device *pdev)
 
 	rmem = of_reserved_mem_lookup(pdev->dev.of_node);
 	if (!rmem) {
-		dev_err(&pdev->dev, "failed to acquire memory region\n");
-		return -EINVAL;
+		dev_err(&pdev->dev, "[crux] failed to acquire memory region, trying dynscan\n");
+		return crux_cmd_db_dynscan();
 	}
 
 	cmd_db_header = devm_memremap(&pdev->dev, rmem->base, rmem->size, MEMREMAP_WC);
@@ -357,9 +386,14 @@ static int cmd_db_dev_probe(struct platform_device *pdev)
 	}
 
 	if (!cmd_db_magic_matches(cmd_db_header)) {
-		dev_err(&pdev->dev, "Invalid Command DB Magic\n");
+		/* [crux] 标准路径读不到 magic：试 dynscan 兜底 */
+		dev_err(&pdev->dev, "[crux] reserved region magic mismatch, trying dynscan\n");
 		cmd_db_header = NULL;
-		return -EINVAL;
+		ret = crux_cmd_db_dynscan();
+		if (ret)
+			return ret;
+	} else {
+		pr_err("cmd-db: [crux] standard path OK (magic at reserved region)\n");
 	}
 
 	debugfs_create_file("cmd-db", 0400, NULL, NULL, &cmd_db_debugfs_ops);

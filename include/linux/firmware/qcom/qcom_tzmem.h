@@ -62,6 +62,16 @@ DEFINE_FREE(qcom_tzmem, void *, if (_T) qcom_tzmem_free(_T))
 
 phys_addr_t qcom_tzmem_to_phys(void *ptr);
 
+/**
+ * qcom_tzmem_shm_bridge_available() - Whether SHM bridge was enabled
+ *
+ * Returns true only if the platform actually enabled SHM Bridge with the
+ * secure world. Platforms blacklisted or lacking SHM Bridge support
+ * return false, in which case callers should fall back to the legacy
+ * (non-SHM-Bridge) path.
+ */
+bool qcom_tzmem_shm_bridge_available(void);
+
 #if IS_ENABLED(CONFIG_QCOM_TZMEM_MODE_SHMBRIDGE)
 int qcom_tzmem_shm_bridge_create(phys_addr_t paddr, size_t size, u64 *handle);
 void qcom_tzmem_shm_bridge_delete(u64 handle);

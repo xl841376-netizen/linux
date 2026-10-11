@@ -9,6 +9,41 @@
 #include "iris_hfi_queue.h"
 #include "iris_vpu_common.h"
 
+static u32 iris_hfi_queue_table_size(struct iris_core *core)
+{
+	if (core->iris_platform_data->legacy_vpu5)
+		return sizeof(struct iris_hfi_legacy_queue_table_header);
+
+	return sizeof(struct iris_hfi_queue_table_header);
+}
+
+static u32 iris_hfi_single_queue_size(struct iris_core *core)
+{
+	u32 count = core->iris_platform_data->legacy_vpu5 ?
+		IFACEQ_LEGACY_MAX_BUF_COUNT : IFACEQ_MAX_BUF_COUNT;
+
+	return IFACEQ_MAX_PKT_SIZE * count * IFACE_MAX_PARALLEL_SESSIONS;
+}
+
+static u32 iris_hfi_queue_used_size(struct iris_core *core)
+{
+	return ALIGN(iris_hfi_queue_table_size(core) +
+		     iris_hfi_single_queue_size(core) * IFACEQ_NUMQ, SZ_4K);
+}
+
+u32 iris_hfi_queue_region_size(struct iris_core *core)
+{
+	return ALIGN(SFR_SIZE + iris_hfi_queue_used_size(core), SZ_1M);
+}
+
+static u32 iris_hfi_queue_alloc_size(struct iris_core *core)
+{
+	if (core->iris_platform_data->legacy_vpu5)
+		return iris_hfi_queue_region_size(core);
+
+	return iris_hfi_queue_used_size(core);
+}
+
 static int iris_hfi_queue_write(struct iris_iface_q_info *qinfo, void *packet, u32 packet_size)
 {
 	struct iris_hfi_queue_header *queue = qinfo->qhdr;
@@ -20,7 +55,7 @@ static int iris_hfi_queue_write(struct iris_iface_q_info *qinfo, void *packet, u
 	if (write_idx < read_idx)
 		empty_space = read_idx - write_idx;
 	else
-		empty_space = IFACEQ_QUEUE_SIZE - (write_idx -  read_idx);
+		empty_space = qinfo->size - (write_idx -  read_idx);
 	if (empty_space < packet_size)
 		return -ENOSPC;
 
@@ -31,13 +66,13 @@ static int iris_hfi_queue_write(struct iris_iface_q_info *qinfo, void *packet, u
 
 	if (write_ptr < (u32 *)qinfo->kernel_vaddr ||
 	    write_ptr > (u32 *)(qinfo->kernel_vaddr +
-	    IFACEQ_QUEUE_SIZE))
+		    qinfo->size))
 		return -EINVAL;
 
-	if (new_write_idx < IFACEQ_QUEUE_SIZE) {
+	if (new_write_idx < qinfo->size) {
 		memcpy(write_ptr, packet, packet_size);
 	} else {
-		residue = new_write_idx - IFACEQ_QUEUE_SIZE;
+		residue = new_write_idx - qinfo->size;
 		memcpy(write_ptr, packet, (packet_size - residue));
 		memcpy(qinfo->kernel_vaddr,
 		       packet + (packet_size - residue), residue);
@@ -77,7 +112,7 @@ static int iris_hfi_queue_read(struct iris_iface_q_info *qinfo, void *packet)
 	read_ptr = qinfo->kernel_vaddr + read_idx;
 	if (read_ptr < (u32 *)qinfo->kernel_vaddr ||
 	    read_ptr > (u32 *)(qinfo->kernel_vaddr +
-	    IFACEQ_QUEUE_SIZE - sizeof(*read_ptr)))
+		    qinfo->size - sizeof(*read_ptr)))
 		return -ENODATA;
 
 	packet_size = *read_ptr;
@@ -86,10 +121,10 @@ static int iris_hfi_queue_read(struct iris_iface_q_info *qinfo, void *packet)
 
 	new_read_idx = read_idx + packet_size;
 	if (packet_size <= IFACEQ_CORE_PKT_SIZE) {
-		if (new_read_idx < IFACEQ_QUEUE_SIZE) {
+		if (new_read_idx < qinfo->size) {
 			memcpy(packet, read_ptr, packet_size);
 		} else {
-			residue = new_read_idx - IFACEQ_QUEUE_SIZE;
+			residue = new_read_idx - qinfo->size;
 			memcpy(packet, read_ptr, (packet_size - residue));
 			memcpy((packet + (packet_size - residue)),
 			       qinfo->kernel_vaddr, residue);
@@ -203,7 +238,7 @@ static void iris_hfi_queue_set_header(struct iris_core *core, u32 queue_id,
 	iface_q->qhdr->start_addr = iface_q->device_addr;
 	iface_q->qhdr->header_type = IFACEQ_DFLT_QHDR;
 	iface_q->qhdr->queue_type = queue_id;
-	iface_q->qhdr->q_size = IFACEQ_QUEUE_SIZE / sizeof(u32);
+	iface_q->qhdr->q_size = iface_q->size / sizeof(u32);
 	iface_q->qhdr->pkt_size = 0; /* variable packet size */
 	iface_q->qhdr->rx_wm = 0x1;
 	iface_q->qhdr->tx_wm = 0x1;
@@ -226,12 +261,19 @@ static void
 iris_hfi_queue_init(struct iris_core *core, u32 queue_id, struct iris_iface_q_info *iface_q)
 {
 	struct iris_hfi_queue_table_header *q_tbl_hdr = core->iface_q_table_vaddr;
-	u32 offset = sizeof(*q_tbl_hdr) + (queue_id * IFACEQ_QUEUE_SIZE);
+	struct iris_hfi_legacy_queue_table_header *legacy_tbl_hdr =
+		core->iface_q_table_vaddr;
+	u32 queue_size = iris_hfi_single_queue_size(core);
+	u32 offset = iris_hfi_queue_table_size(core) + queue_id * queue_size;
 
 	iface_q->device_addr = core->iface_q_table_daddr + offset;
 	iface_q->kernel_vaddr =
 			(void *)((char *)core->iface_q_table_vaddr + offset);
-	iface_q->qhdr = &q_tbl_hdr->q_hdr[queue_id];
+	iface_q->size = queue_size;
+	if (core->iris_platform_data->legacy_vpu5)
+		iface_q->qhdr = &legacy_tbl_hdr->q_hdr[queue_id];
+	else
+		iface_q->qhdr = &q_tbl_hdr->q_hdr[queue_id];
 
 	iris_hfi_queue_set_header(core, queue_id, iface_q);
 }
@@ -241,15 +283,16 @@ static void iris_hfi_queue_deinit(struct iris_iface_q_info *iface_q)
 	iface_q->qhdr = NULL;
 	iface_q->kernel_vaddr = NULL;
 	iface_q->device_addr = 0;
+	iface_q->size = 0;
 }
 
 int iris_hfi_queues_init(struct iris_core *core)
 {
 	struct iris_hfi_queue_table_header *q_tbl_hdr;
+	struct iris_hfi_legacy_queue_table_header *legacy_tbl_hdr;
 	u32 queue_size;
 
-	/* Iris hardware requires 4K queue alignment */
-	queue_size = ALIGN((sizeof(*q_tbl_hdr) + (IFACEQ_QUEUE_SIZE * IFACEQ_NUMQ)), SZ_4K);
+	queue_size = iris_hfi_queue_alloc_size(core);
 	core->iface_q_table_vaddr = dma_alloc_attrs(core->dev, queue_size,
 						    &core->iface_q_table_daddr,
 						    GFP_KERNEL, DMA_ATTR_WRITE_COMBINE);
@@ -257,6 +300,7 @@ int iris_hfi_queues_init(struct iris_core *core)
 		dev_err(core->dev, "queues alloc and map failed\n");
 		return -ENOMEM;
 	}
+	memset(core->iface_q_table_vaddr, 0, queue_size);
 
 	core->sfr_vaddr = dma_alloc_attrs(core->dev, SFR_SIZE,
 					  &core->sfr_daddr,
@@ -272,19 +316,32 @@ int iris_hfi_queues_init(struct iris_core *core)
 	iris_hfi_queue_init(core, IFACEQ_MSGQ_ID, &core->message_queue);
 	iris_hfi_queue_init(core, IFACEQ_DBGQ_ID, &core->debug_queue);
 
-	q_tbl_hdr = (struct iris_hfi_queue_table_header *)core->iface_q_table_vaddr;
-	q_tbl_hdr->version = 0;
-	q_tbl_hdr->device_addr = (void *)core;
-	strscpy(q_tbl_hdr->name, "iris-hfi-queues", sizeof(q_tbl_hdr->name));
-	q_tbl_hdr->size = sizeof(*q_tbl_hdr);
-	q_tbl_hdr->qhdr0_offset = sizeof(*q_tbl_hdr) -
-		(IFACEQ_NUMQ * sizeof(struct iris_hfi_queue_header));
-	q_tbl_hdr->qhdr_size = sizeof(q_tbl_hdr->q_hdr[0]);
-	q_tbl_hdr->num_q = IFACEQ_NUMQ;
-	q_tbl_hdr->num_active_q = IFACEQ_NUMQ;
+	if (core->iris_platform_data->legacy_vpu5) {
+		legacy_tbl_hdr = core->iface_q_table_vaddr;
+		legacy_tbl_hdr->version = 0;
+		legacy_tbl_hdr->size = sizeof(*legacy_tbl_hdr);
+		legacy_tbl_hdr->qhdr0_offset =
+			offsetof(struct iris_hfi_legacy_queue_table_header, q_hdr);
+		legacy_tbl_hdr->qhdr_size = sizeof(legacy_tbl_hdr->q_hdr[0]);
+		legacy_tbl_hdr->num_q = IFACEQ_NUMQ;
+		legacy_tbl_hdr->num_active_q = IFACEQ_NUMQ;
+	} else {
+		q_tbl_hdr = core->iface_q_table_vaddr;
+		q_tbl_hdr->version = 0;
+		q_tbl_hdr->device_addr = (void *)core;
+		strscpy(q_tbl_hdr->name, "iris-hfi-queues", sizeof(q_tbl_hdr->name));
+		q_tbl_hdr->size = sizeof(*q_tbl_hdr);
+		q_tbl_hdr->qhdr0_offset = sizeof(*q_tbl_hdr) -
+			(IFACEQ_NUMQ * sizeof(struct iris_hfi_queue_header));
+		q_tbl_hdr->qhdr_size = sizeof(q_tbl_hdr->q_hdr[0]);
+		q_tbl_hdr->num_q = IFACEQ_NUMQ;
+		q_tbl_hdr->num_active_q = IFACEQ_NUMQ;
+	}
 
 	 /* Write sfr size in first word to be used by firmware */
 	*((u32 *)core->sfr_vaddr) = SFR_SIZE;
+	/* Publish queue and SFR metadata before firmware starts consuming it. */
+	wmb();
 
 	return 0;
 }
@@ -306,8 +363,7 @@ void iris_hfi_queues_deinit(struct iris_core *core)
 	core->sfr_vaddr = NULL;
 	core->sfr_daddr = 0;
 
-	queue_size = ALIGN(sizeof(struct iris_hfi_queue_table_header) +
-		(IFACEQ_QUEUE_SIZE * IFACEQ_NUMQ), SZ_4K);
+	queue_size = iris_hfi_queue_alloc_size(core);
 
 	dma_free_attrs(core->dev, queue_size, core->iface_q_table_vaddr,
 		       core->iface_q_table_daddr, DMA_ATTR_WRITE_COMBINE);

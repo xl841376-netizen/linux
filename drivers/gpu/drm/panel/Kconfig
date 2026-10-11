@@ -1108,6 +1108,23 @@ config DRM_PANEL_SAMSUNG_SOFEF00
 
 	    Samsung AMS628NW01 (found in OnePlus 6, 1080x2280@60Hz)
 
+config DRM_PANEL_CRUX_TE_SYNC
+	bool "crux panel TE frame-sync source"
+	depends on DEBUG_FS
+	help
+	  [crux] Take over the panel TE pin and expose its pulse count/rate,
+	  used as the frame-sync (force vertical sync) source for the
+	  command-mode panel on Xiaomi crux.
+
+config DRM_PANEL_SAMSUNG_EA8076_F1S
+	tristate "Samsung EA8076 F1S panel driver (Xiaomi crux)"
+	depends on OF
+	depends on DRM_MIPI_DSI
+	depends on BACKLIGHT_CLASS_DEVICE
+	help
+	  Say Y here if you want to enable support for the Samsung EA8076 F1S
+	  1080x2340 panel as found in the Xiaomi Mi 9 Pro 5G (crux).
+
 config DRM_PANEL_SEIKO_43WVF1G
 	tristate "Seiko 43WVF1G panel"
 	depends on OF

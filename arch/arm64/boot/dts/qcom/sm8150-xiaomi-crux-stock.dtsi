@@ -1,0 +1,256 @@
+// SPDX-License-Identifier: BSD-3-Clause
+/*
+ * 同步段：全部取自用户提供的原厂 crux DTB（/storage/emulated/0/Download/Bluetooth/fdt
+ * 解码为 /root/stock_crux.dts），不是从我们 6.17 树上搬的。
+ *
+ * 原厂事实（stock_crux.dts 行号）：
+ *   slim@171c0000        行 10366   reg = <0x171c0000 0x2c000 0x17184000 0x2c000>
+ *                                  interrupts = <0 0xa3 0>, <0 0xa4 0>
+ *   slim@171c0000/tavil_codec  行 10389 （WCD9340，原厂叫 tavil-slim-pgd）
+ *   qcom,qpnp-smb5       行 5917    （充电器）
+ *   qpnp,fg              行 6048    （qcom,fg-gen4 电量计）
+ *   qcom,battery-data    行 30190   （电池 profile）
+ *
+ * 写法：原厂值 + 主线能认的节点形式（slim-ngd / slimbus / slimbus BAM / wcd934x）。
+ * 原厂里那几根“下游专属胶水”（wcd9xxx-irq / audio_ext_clk_lnbb / msm_cdc_pinctrl@143）
+ * 主线没有对应节点，按主线惯例直接落成：中断用 tlmm 123，reset 用 tlmm 143，时钟用 RPMH_LN_BB_CLK2。
+ */
+
+/* ---- slim BAM（原厂把它并进 slim@171c0000 的 reg 里，主线要独立 dma-controller 节点）---- */
+&soc {
+	slimbam: dma-controller@17184000 {
+		compatible = "qcom,bam-v1.7.0";
+		reg = <0 0x17184000 0 0x2c000>;
+		interrupts = <GIC_SPI 164 IRQ_TYPE_LEVEL_HIGH>;
+		#dma-cells = <1>;
+		qcom,ee = <0>;
+	};
+
+	/* ---- slim-ngd 控制器（原厂 slim@171c0000）---- */
+	slim: slim-ngd@171c0000 {
+		compatible = "qcom,slim-ngd-v2.1.0";
+		reg = <0 0x171c0000 0 0x2c000>;
+		interrupts = <GIC_SPI 163 IRQ_TYPE_LEVEL_HIGH>;
+
+		dmas = <&slimbam 3>, <&slimbam 4>;
+		dma-names = "rx", "tx";
+
+		iommus = <&apps_smmu 0x1b46 0x0>;
+		qcom,protection-domain = "avs/audio", "msm/adsp/audio_pd";
+		#address-cells = <1>;
+		#size-cells = <0>;
+		status = "disabled";
+	};
+};
+
+/* ---- WCD9340（原厂 tavil_codec）---- */
+&slim {
+	status = "okay";
+
+	slim@1 {
+		reg = <1>;
+		#address-cells = <2>;
+		#size-cells = <0>;
+
+		wcd9340_ifd: ifd@0,0 {
+			compatible = "slim217,250";
+			reg = <0 0>;
+		};
+
+		wcd9340: codec@1,0 {
+			compatible = "slim217,250";
+			reg = <1 0>;
+			slim-ifc-dev = <&wcd9340_ifd>;
+
+			#sound-dai-cells = <1>;
+
+			/* 原厂：interrupt-parent = <&wcd9xxx-irq>，qcom,gpio-connect = <&tlmm 0x7b 0> */
+			interrupts-extended = <&tlmm 123 IRQ_TYPE_LEVEL_HIGH>;
+			interrupt-controller;
+			#interrupt-cells = <1>;
+
+			/* 原厂：clocks = <&audio_ext_clk_lnbb 0>，qcom,cdc-mclk-clk-rate = <0x927c00> */
+			clock-names = "extclk";
+			clocks = <&rpmhcc RPMH_LN_BB_CLK2>;
+			#clock-cells = <0>;
+			clock-frequency = <9600000>;
+			clock-output-names = "mclk";
+
+			pinctrl-0 = <&wcd_intr_default>;
+			pinctrl-names = "default";
+
+			/* 供电（原厂 cdc-vdd-buck/sido/vddpx-1=pm8150-s4，cdc-vdd-3v3=pm8150l-bob）放板级文件末尾 */
+
+			/* 原厂 qcom,cdc-micbiasX-mv = <0xa8c 0x708 0xa8c 0xa8c> = 2700/1800/2700/2700mV */
+			qcom,micbias1-microvolt = <2700000>;
+			qcom,micbias2-microvolt = <1800000>;
+			qcom,micbias3-microvolt = <2700000>;
+			qcom,micbias4-microvolt = <2700000>;
+
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			/* 主线原生形式（主线 sdm845-wcd9340.dtsi 同款，驱动是 qcom,wcd9340-gpio） */
+			wcdgpio: gpio-controller@42 {
+				compatible = "qcom,wcd9340-gpio";
+				gpio-controller;
+				#gpio-cells = <2>;
+				reg = <0x42 0x2>;
+			};
+
+			swm: soundwire@c85 {
+				compatible = "qcom,soundwire-v1.3.0";
+				reg = <0xc85 0x40>;
+				interrupts-extended = <&wcd9340 20>;
+
+				qcom,dout-ports = <6>;
+				qcom,din-ports = <2>;
+				qcom,ports-sinterval-low = /bits/ 8  <0x07 0x1f 0x3f 0x7 0x1f 0x3f 0x0f 0x0f>;
+				qcom,ports-offset1 = /bits/ 8 <0x01 0x02 0x0c 0x6 0x12 0x0d 0x07 0x0a>;
+				qcom,ports-offset2 = /bits/ 8 <0x00 0x00 0x1f 0x00 0x00 0x1f 0x00 0x00>;
+
+				#sound-dai-cells = <1>;
+				clocks = <&wcd9340>;
+				clock-names = "iface";
+				#address-cells = <2>;
+				#size-cells = <0>;
+			};
+
+			/* [原厂] codec 的两个子节点（原厂 DTB：wcd_pinctrl@5 / swr_master，行号见头注释） */
+
+		};
+	};
+};
+
+&tlmm {
+	wcd_intr_default: wcd-intr-default-state {
+		pins = "gpio123";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-pull-down;
+		input-enable;
+	};
+};
+
+/* ---- 充电器（原厂 qcom,qpnp-smb5，原样搬）---- */
+
+/* ---- 电量计（原厂 qpnp,fg / qcom,fg-gen4，原样搬）---- */
+&{/soc@0/spmi@c440000/pmic@2} {
+
+					pm8150b_fg: qpnp,fg {
+						compatible = "qcom,fg-gen4";
+						#address-cells = <0x01>;
+						#size-cells = <0x01>;
+						qcom,pmic-pbs = <0x515>;
+						status = "okay";
+						nvmem-names = "fg_sdam";
+						nvmem = <0x516>;
+						qcom,fg-esr-timer-chg-fast = <0x00 0x07>;
+						qcom,fg-esr-timer-dischg-fast = <0x00 0x07>;
+						qcom,fg-esr-timer-chg-slow = <0x00 0x60>;
+						qcom,fg-esr-timer-dischg-slow = <0x00 0x60>;
+						qcom,fg-esr-cal-soc-thresh = <0x1a 0xe6>;
+						qcom,fg-esr-cal-temp-thresh = <0x0a 0x28>;
+						qcom,rapid-soc-dec-en;
+						qcom,fg-sys-term-current = <0xfffffed4>;
+						qcom,fg-cutoff-voltage = <0xd48>;
+						qcom,fg-cutoff-current = <0xc8>;
+						qcom,fg-empty-voltage = <0xc1c>;
+						qcom,fg-batt-temp-delta = <0x06>;
+						qcom,fg-force-load-profile;
+	
+						qcom,fg-batt-soc@4000 {
+							status = "okay";
+							reg = <0x4000 0x100>;
+							interrupts = <0x02 0x40 0x00 0x03 0x02 0x40 0x01 0x03 0x02 0x40 0x02 0x01 0x02 0x40 0x03 0x01 0x02 0x40 0x04 0x03 0x02 0x40 0x05 0x01 0x02 0x40 0x06 0x03 0x02 0x40 0x07 0x03>;
+							interrupt-names = "soc-update", "soc-ready", "bsoc-delta", "msoc-delta", "msoc-low", "msoc-empty", "msoc-high", "msoc-full";
+						};
+	
+						qcom,fg-batt-info@4100 {
+							status = "okay";
+							reg = <0x4100 0x100>;
+							interrupts = <0x02 0x41 0x00 0x03 0x02 0x41 0x01 0x03 0x02 0x41 0x03 0x01>;
+							interrupt-names = "vbatt-low", "vbatt-pred-delta", "esr-delta";
+						};
+	
+						qcom,fg-rradc@4200 {
+							status = "okay";
+							reg = <0x4200 0x100>;
+							interrupts = <0x02 0x42 0x00 0x03 0x02 0x42 0x01 0x03 0x02 0x42 0x02 0x03 0x02 0x42 0x03 0x03 0x02 0x42 0x04 0x03>;
+							interrupt-names = "batt-missing", "batt-id", "batt-temp-delta", "batt-temp-hot", "batt-temp-cold";
+						};
+	
+						qcom,fg-memif@4300 {
+							status = "okay";
+							reg = <0x4300 0x100>;
+							interrupts = <0x02 0x43 0x00 0x03 0x02 0x43 0x01 0x03 0x02 0x43 0x02 0x03 0x02 0x43 0x03 0x01 0x02 0x43 0x04 0x02>;
+							interrupt-names = "ima-rdy", "ima-xcp", "dma-xcp", "dma-grant", "mem-attn";
+						};
+					};
+};
+
+/* ---- 电池 profile（原厂 /vendor/qcom,battery-data，原样搬）---- */
+
+/* ---- 以下两块原厂 DTB 里没有（它没声明 apr/q6 服务，也没写板级声卡），主线框架必需 ---- */
+/ {
+	sound: sound {
+	};
+};
+
+&{/soc@0/remoteproc@17300000/glink-edge} {
+	apr {
+		compatible = "qcom,apr-v2";
+		qcom,glink-channels = "apr_audio_svc";
+		qcom,domain = <APR_DOMAIN_ADSP>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		apr-service@3 {
+			reg = <APR_SVC_ADSP_CORE>;
+			compatible = "qcom,q6core";
+			qcom,protection-domain = "avs/audio", "msm/adsp/audio_pd";
+		};
+
+		q6afe: apr-service@4 {
+			compatible = "qcom,q6afe";
+			reg = <APR_SVC_AFE>;
+			qcom,protection-domain = "avs/audio", "msm/adsp/audio_pd";
+
+			q6afedai: dais {
+				compatible = "qcom,q6afe-dais";
+				#address-cells = <1>;
+				#size-cells = <0>;
+				#sound-dai-cells = <1>;
+			};
+
+			q6afecc: cc {
+				compatible = "qcom,q6afe-clocks";
+				#clock-cells = <2>;
+			};
+		};
+
+		q6asm: apr-service@7 {
+			compatible = "qcom,q6asm";
+			reg = <APR_SVC_ASM>;
+			qcom,protection-domain = "avs/audio", "msm/adsp/audio_pd";
+
+			q6asmdai: dais {
+				compatible = "qcom,q6asm-dais";
+				#address-cells = <1>;
+				#size-cells = <0>;
+				#sound-dai-cells = <1>;
+			};
+		};
+
+		q6adm: apr-service@8 {
+			compatible = "qcom,q6adm";
+			reg = <APR_SVC_ADM>;
+			qcom,protection-domain = "avs/audio", "msm/adsp/audio_pd";
+
+			q6routing: routing {
+				compatible = "qcom,q6adm-routing";
+				#sound-dai-cells = <0>;
+			};
+		};
+	};
+};

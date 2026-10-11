@@ -1,0 +1,179 @@
+/*
+ * [crux 7.3] 显示链路
+ *
+ * 来源分层：
+ *  - 面板节点 / 供电 / 引脚 / 引脚组：抄自我们 6.17 已跑通的板级
+ *    (linux-v6.17.0-sm8150/.../sm8150-xiaomi-crux.dts 1692-1805 行)
+ *  - 面板 timing 数值来源：原厂 4.14 DT
+ *    dsi-panel-samsung-fhd-ea8076-f1s-cmd.dtsi
+ *    60Hz: 1080x2340, hfp64/hbp64/hpw20, vbp64/vfp88/vpw20, clockrate 1110000000
+ *  - 面板属性：cmd mode / burst mode / 单 DSI / 无 DSC（原厂该文件 grep dsc 零命中）
+ *  - 驱动：drivers/gpu/drm/panel/panel-samsung-ea8076-f1s.c（7.3 已内建 y）
+ */
+
+&soc {
+	disp_vci_vreg: disp_vci_vreg {
+		compatible = "regulator-fixed";
+		regulator-name = "disp_vci_vreg_gpio7";
+		start-delay-us = <4000>;
+		enable-active-high;
+		regulator-boot-on;
+		gpio = <&tlmm 7 0>;
+	};
+
+	disp_vci_vreg_f1x: disp_vci_vreg_f1x {
+		compatible = "regulator-fixed";
+		regulator-name = "disp_vci_vreg";
+		start-delay-us = <4000>;
+		enable-active-high;
+		regulator-boot-on;
+		gpio = <&tlmm 21 0>;
+	};
+};
+
+&tlmm {
+	sde_dsi_active: sde_dsi_active {
+		mux {
+			pins = "gpio11", "gpio7";
+			function = "gpio";
+		};
+
+		config {
+			pins = "gpio11", "gpio7";
+			drive-strength = <8>;
+			bias-disable;
+		};
+	};
+
+	sde_dsi_suspend: sde_dsi_suspend {
+		mux {
+			pins = "gpio11", "gpio7";
+			function = "gpio";
+		};
+
+		config {
+			pins = "gpio11", "gpio7";
+			drive-strength = <2>;
+			bias-pull-down;
+		};
+	};
+
+	sde_te_active: sde_te_active {
+		mux {
+			pins = "gpio8";
+			function = "mdp_vsync";
+		};
+
+		config {
+			pins = "gpio8";
+			drive-strength = <2>;
+			bias-pull-down;
+		};
+	};
+
+	sde_te_suspend: sde_te_suspend {
+		mux {
+			pins = "gpio8";
+			function = "mdp_vsync";
+		};
+
+		config {
+			pins = "gpio8";
+			drive-strength = <2>;
+			bias-pull-down;
+		};
+	};
+};
+
+&mdss {
+	status = "okay";
+};
+
+&mdss_mdp {
+	status = "okay";
+};
+
+&dispcc {
+	status = "okay";
+};
+
+&mdss_dsi0 {
+	pinctrl-names = "default", "sleep";
+	/* TE pin gpio8 -> mdp_vsync */
+	pinctrl-0 = <&sde_te_active>;
+	pinctrl-1 = <&sde_te_suspend>;
+
+	status = "okay";
+	vdda-supply = <&vdda_mipi_dsi0_1p2>;
+
+	panel@0 {
+		compatible = "samsung,ea8076-f1s";
+		/*
+		 * [crux] 帧率默认档：开机用哪一档由这里决定（60/72/81/90）。
+		 * 内核面板驱动的帧率管理与引导器（GRUB cruxdisplay.mod）
+		 * 都读这一条属性，保证两边选的表一致；不写就是 60。
+		 */
+		samsung,default-framerate = <60>;
+		reg = <0>;
+		status = "okay";
+
+		vddio-supply = <&touch_vddio_vreg>;
+		vcie-supply = <&disp_vci_vreg_f1x>;
+		vci-supply = <&disp_vci_vreg>;
+
+		reset-gpios = <&tlmm 11 GPIO_ACTIVE_LOW>;
+
+		pinctrl-names = "panel_active", "panel_suspend";
+		pinctrl-0 = <&sde_dsi_active &sde_te_active>;
+		pinctrl-1 = <&sde_dsi_suspend &sde_te_suspend>;
+
+		port {
+			panel_in: endpoint {
+				remote-endpoint = <&mdss_dsi0_out>;
+			};
+		};
+	};
+};
+
+&mdss_dsi0_out {
+	status = "okay";
+	data-lanes = <0 1 2 3>;
+	remote-endpoint = <&panel_in>;
+};
+
+&mdss_dsi0_phy {
+	status = "okay";
+	vdds-supply = <&vreg_l5a_0p875>;
+};
+
+/* crux 是 AMOLED，亮度走面板 DCS（驱动自带 backlight）；WLED 按 6.17 保持开启 */
+&pm8150l_wled {
+	qcom,num-strings = <3>;
+	qcom,current-limit-microamp = <20000>;
+	qcom,ovp-millivolt = <29500>;
+	label = "backlight";
+	status = "okay";
+};
+
+/*
+ * [crux 7.3] DSI 的 refgen 供电。
+ * 7.3 的 msm dsi 驱动（dsi_cfg.c 的 dsi_v2_4_regulators）会把 "refgen" 一起 bulk-get，
+ * 缺这根 supply 直接 -EPROBE_DEFER（实测：deferred probe pending: msm_dsi: Failed to get supply 'refgen'）。
+ * 6.17 那版驱动还没要它，所以老的板级里没有。
+ */
+&mdss_dsi0 {
+	refgen-supply = <&refgen>;
+};
+
+/*
+ * [crux 7.3] 显示路径寄存器观测器（帧同步/tear check 取证）
+ * 面板是命令模式，帧完成靠 DPU INTF_1 的 tear check（等面板 TE）。
+ * 驱动只 ioremap 两块窗口读寄存器，不占用任何引脚/不碰硬件状态。
+ * 窗口：DPU INTF_1 = 0xae01000(mdp) + 0x6a800；DSI0 ctrl = 0xae94000
+ */
+&soc {
+	crux_te_sync: crux-te-sync {
+		compatible = "crux,te-sync";
+		status = "okay";
+	};
+};

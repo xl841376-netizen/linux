@@ -6,6 +6,7 @@
 #define __QCOM_SCM_H
 
 #include <linux/err.h>
+#include <linux/list.h>
 #include <linux/types.h>
 #include <linux/cpumask.h>
 
@@ -173,6 +174,79 @@ int qcom_scm_qseecom_app_get_id(const char *app_name, u32 *app_id);
 int qcom_scm_qseecom_app_send(u32 app_id, void *req, size_t req_size,
 			      void *rsp, size_t rsp_size);
 
+/*
+ * Load a QSEE application image (or shared services image, e.g. cmnlib)
+ * into the TEE.  @img contains the concatenation of the .mdt header and
+ * all .b0x segments; @mdt_len is the size of the .mdt part and @img_len
+ * the total size.
+ *
+ * Return: the application id on success (qcom_scm_qseecom_app_load()),
+ *         zero on success (qcom_scm_qseecom_services_load()),
+ *         negative error code on failure.
+ */
+int qcom_scm_qseecom_app_load(void *img, size_t mdt_len, size_t img_len,
+			      u32 *app_id);
+int qcom_scm_qseecom_app_shutdown(u32 app_id);
+int qcom_scm_qseecom_services_load(const void *img, size_t mdt_len,
+				   size_t img_len);
+
+/*
+ * QSEECOM listener support (legacy APP_MGR namespace).
+ *
+ * A listener is a userspace service that QTEE can call while processing
+ * a request (e.g. while loading a TA).  register() allocates a shared
+ * buffer from the SCM TZ memory pool and returns its virtual address;
+ * the caller owns it and frees it with qcom_tzmem_free() after
+ * deregistering.
+ */
+void *qcom_scm_qseecom_listener_register_legacy(u32 listener_id, size_t sb_len);
+/**
+ * enum qcom_scm_qseecom_listener_status - Result of servicing a listener request.
+ */
+enum qcom_scm_qseecom_listener_status {
+	QSEECOM_LISTENER_SUCCESS	= 0,
+	QSEECOM_LISTENER_FAILURE	= 1,
+};
+
+/**
+ * struct qcom_scm_qseecom_listener - A QSEE listener service.
+ * @id:      Listener ID, as agreed with the apps that call it.
+ * @sb:      Shared buffer, TZ memory, mapped for as long as registered.
+ * @sb_len:  Size of @sb in bytes.
+ * @service: Called when a QSEE app asks this listener to do something.
+ * @node:    Internal.
+ */
+struct qcom_scm_qseecom_listener {
+	u32 id;
+	void *sb;
+	size_t sb_len;
+	int (*service)(struct qcom_scm_qseecom_listener *listener);
+	struct list_head node;
+};
+
+int qcom_scm_qseecom_listener_register(struct qcom_scm_qseecom_listener *listener);
+int qcom_scm_qseecom_listener_unregister(struct qcom_scm_qseecom_listener *listener);
+void *qcom_scm_qseecom_listener_register_legacy_ex(u32 listener_id,
+					       size_t sb_len, u32 sb_type);
+int qcom_scm_qseecom_rpmb_check_prov_status(u64 *status);
+int qcom_scm_qseecom_ks_get_max_keys(u64 *max_keys);
+int qcom_scm_qseecom_services_load(const void *img, size_t mdt_len,
+				   size_t img_len);
+int qcom_scm_qseecom_app_load_ex(const void *img, size_t mdt_len,
+				 size_t img_len, u32 *listener_id);
+
+
+int qcom_scm_qseecom_listener_deregister(u32 listener_id);
+int qcom_scm_qseecom_listener_response(u32 listener_id, u32 status);
+
+/*
+ * Same as qcom_scm_qseecom_app_load() but reports asynchronous states:
+ * returns -EAGAIN with *listener_id set when QTEE returned INCOMPLETE,
+ * and -EBUSY with *listener_id set when BLOCKED_ON_LISTENER.
+ */
+int qcom_scm_qseecom_app_load_ex(const void *img, size_t mdt_len,
+				 size_t img_len, u32 *listener_id);
+
 #else /* CONFIG_QCOM_QSEECOM */
 
 static inline int qcom_scm_qseecom_app_get_id(const char *app_name, u32 *app_id)
@@ -187,9 +261,55 @@ static inline int qcom_scm_qseecom_app_send(u32 app_id,
 	return -EINVAL;
 }
 
+static inline int qcom_scm_qseecom_app_load(const void *img, size_t mdt_len,
+					    size_t img_len)
+{
+	return -EINVAL;
+}
+
+static inline int qcom_scm_qseecom_services_load(const void *img,
+						 size_t mdt_len,
+						 size_t img_len)
+{
+	return -EINVAL;
+}
+
+static inline void *qcom_scm_qseecom_listener_register(u32 listener_id,
+					       size_t sb_len)
+{
+	return NULL;
+}
+
+static inline int qcom_scm_qseecom_listener_deregister(u32 listener_id)
+{
+	return -EINVAL;
+}
+
+static inline int qcom_scm_qseecom_listener_response(u32 listener_id,
+					     u32 status)
+{
+	return -EINVAL;
+}
+
+static inline int qcom_scm_qseecom_app_load_ex(const void *img, size_t mdt_len,
+					       size_t img_len,
+					       u32 *listener_id)
+{
+	return -EINVAL;
+}
+
 #endif /* CONFIG_QCOM_QSEECOM */
 
-int qcom_scm_qtee_invoke_smc(phys_addr_t inbuf, size_t inbuf_size,
+/*
+ * QTEE (smcinvoke) invoke command.
+ *
+ * QCOM_SCM_QTEE_CMD_AUTO lets the driver use the command variant
+ * detected during probe. An explicit SMCINVOKE_INVOKE command may be
+ * passed only for testing.
+ */
+#define QCOM_SCM_QTEE_CMD_AUTO		0xffffffffU
+
+int qcom_scm_qtee_invoke_smc(u32 cmd, phys_addr_t inbuf, size_t inbuf_size,
 			     phys_addr_t outbuf, size_t outbuf_size,
 			     u64 *result, u64 *response_type);
 int qcom_scm_qtee_callback_response(phys_addr_t buf, size_t buf_size,

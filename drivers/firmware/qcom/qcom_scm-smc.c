@@ -220,6 +220,12 @@ int __scm_smc_call(struct device *dev, const struct qcom_scm_desc *desc,
 		res->result[2] = smc_res.a3;
 	}
 
+	if (smc_res.a0)
+		pr_info("qcom_scm[SMC]: svc=0x%x cmd=0x%x a0=0x%llx (remap=%d)\n",
+			desc->svc, desc->cmd,
+			(unsigned long long)smc_res.a0,
+			qcom_scm_remap_error(smc_res.a0));
+
 	return (long)smc_res.a0 ? qcom_scm_remap_error(smc_res.a0) : 0;
 
 }

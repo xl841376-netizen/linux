@@ -586,4 +586,16 @@ source "drivers/misc/keba/Kconfig"
 source "drivers/misc/amd-sbi/Kconfig"
 source "drivers/misc/rp1/Kconfig"
 source "drivers/misc/issei/Kconfig"
+
+config MHI_USERCHAN
+	tristate "MHI userspace channel pipes (/dev/mhi_pipe_N)"
+	depends on MHI_BUS
+	help
+	  Expose MHI channels to userspace as /dev/mhi_pipe_<n> character
+	  devices: read() returns packets from the DL channel, write() queues
+	  packets to the UL channel.  Used for loading firmware into the
+	  external SDX50M (X50) modem over SAHARA from userspace.
+
+	  If unsure, say N.
+
 endmenu

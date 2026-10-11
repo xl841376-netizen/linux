@@ -215,6 +215,8 @@ int iris_session_streamoff(struct iris_inst *inst, u32 plane)
 		return -EINVAL;
 	}
 
+	inst->streamoff_pending = true;
+
 	ret = hfi_ops->session_stop(inst, plane);
 	if (ret)
 		goto error;

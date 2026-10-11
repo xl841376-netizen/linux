@@ -1,0 +1,122 @@
+
+/* ===== [原厂来源] 外挂 X50 那套：mdm3 / ipa-mhi-proxy / 相关 pinctrl ===== */
+/* 取自 /root/stock_crux.dts 行 29763（qcom,ext-sdx50m）、29796（qcom,ipa-mhi-proxy） */
+&soc {
+	mdm3: qcom,mdm3 {
+	cell-index = <0x00>;
+	#address-cells = <0x00>;
+	interrupt-parent = <&mdm3>;
+	#interrupt-cells = <0x01>;
+	interrupt-map-mask = <0xffffffff>;
+	interrupt-names = "err_fatal_irq", "status_irq", "mdm2ap_vddmin_irq";
+	qcom,ramdump-delay-ms = <0xbb8>;
+	qcom,ramdump-timeout-ms = <0x1d4c0>;
+	qcom,vddmin-modes = "normal";
+	qcom,vddmin-drive-strength = <0x08>;
+	qcom,sfr-query;
+	qcom,sysmon-id = <0x14>;
+	qcom,ssctl-instance-id = <0x10>;
+	qcom,support-shutdown;
+	qcom,pil-force-shutdown;
+	pinctrl-names = "default", "mdm_active", "mdm_suspend";
+	pinctrl-0 = <&ap2mdm_pon_reset_default>;
+	pinctrl-1 = <&ap2mdm_active &mdm2ap_active>;
+	pinctrl-2 = <&ap2mdm_sleep &mdm2ap_sleep>;
+	interrupt-map = <0 &tlmm 0x35 IRQ_TYPE_LEVEL_HIGH>, <1 &tlmm 0x87 IRQ_TYPE_LEVEL_HIGH>;
+	qcom,mdm2ap-errfatal-gpio = <&tlmm 0x35 GPIO_ACTIVE_HIGH>;
+	qcom,ap2mdm-errfatal-gpio = <&tlmm 0x8d GPIO_ACTIVE_HIGH>;
+	qcom,mdm2ap-status-gpio = <&tlmm 0x8e GPIO_ACTIVE_HIGH>;
+	qcom,ap2mdm-status-gpio = <&tlmm 0x87 GPIO_ACTIVE_HIGH>;
+	qcom,ap2mdm-soft-reset-gpio = <&pm8150l_gpios 0x09 GPIO_ACTIVE_HIGH>;
+	qcom,esoc-skip-restart-for-mdm-crash;
+	status = "ok";
+	compatible = "qcom,ext-sdx50m";
+	qcom,mdm-link-info = "0305_01.01.00";
+	};
+
+	qcom,ipa-mhi-proxy {
+	compatible = "qcom,ipa-mhi-proxy";
+	qcom,mhi-chdb-base = <0x40300300>;
+	qcom,mhi-erdb-base = "@0\a";
+	};
+};
+
+&tlmm {
+	ap2mdm {
+
+	ap2mdm_active: ap2mdm-active-state {
+	phandle = <0x3b8>;
+
+	mux {
+	pins = "gpio135", "gpio141";
+	function = "gpio";
+	};
+
+	config {
+	pins = "gpio135", "gpio141";
+	drive-strength = <0x10>;
+	bias-disable;
+	};
+	};
+
+	ap2mdm_sleep: ap2mdm-sleep-state {
+	phandle = <0x3b9>;
+
+	mux {
+	pins = "gpio135", "gpio141";
+	function = "gpio";
+	};
+
+	config {
+	pins = "gpio135", "gpio141";
+	drive-strength = <0x08>;
+	bias-disable;
+	};
+	};
+	};
+
+	mdm2ap {
+
+	mdm2ap_active: mdm2ap-active-state {
+	phandle = <0x3ba>;
+
+	mux {
+	pins = "gpio142", "gpio53";
+	function = "gpio";
+	};
+
+	config {
+	pins = "gpio142", "gpio53";
+	drive-strength = <0x08>;
+	bias-disable;
+	};
+	};
+
+	mdm2ap_sleep: mdm2ap-sleep-state {
+	phandle = <0x3bb>;
+
+	mux {
+	pins = "gpio142", "gpio53";
+	function = "gpio";
+	};
+
+	config {
+	pins = "gpio142", "gpio53";
+	drive-strength = <0x08>;
+	bias-disable;
+	};
+	};
+	};
+};
+
+&pm8150l_gpios {
+	ap2mdm_pon_reset {
+
+	ap2mdm_pon_reset_default: ap2mdm-pon-reset-default-state {
+	pins = "gpio9";
+	function = "normal";
+	power-source = <0x01>;
+	phandle = <0x5e8>;
+	};
+	};
+};

@@ -9,8 +9,22 @@
 #include "iris_hfi_gen1.h"
 #include "iris_hfi_gen1_defines.h"
 #include "iris_instance.h"
+#include "iris_vb2.h"
 #include "iris_vdec.h"
 #include "iris_vpu_buffer.h"
+
+#define IRIS1_MAX_CORRUPT_OUTPUT_DROPS 8
+
+static u32
+iris_hfi_gen1_bufreq_count_min(struct iris_inst *inst,
+			       const struct hfi_buffer_requirements *bufreq)
+{
+	/* VIDEO.IR.1.2 swaps the display-hold and minimum-count fields. */
+	if (inst->core->iris_platform_data->legacy_vpu5)
+		return bufreq->hold_count;
+
+	return bufreq->count_min;
+}
 
 static void iris_hfi_gen1_read_changed_params(struct iris_inst *inst,
 					      struct hfi_msg_event_notify_pkt *pkt)
@@ -79,7 +93,7 @@ static void iris_hfi_gen1_read_changed_params(struct iris_inst *inst,
 		case HFI_PROPERTY_CONFIG_BUFFER_REQUIREMENTS:
 			data_ptr += sizeof(u32);
 			bufreq = (struct hfi_buffer_requirements *)data_ptr;
-			event.buf_count = bufreq->count_min;
+			event.buf_count = iris_hfi_gen1_bufreq_count_min(inst, bufreq);
 			data_ptr += sizeof(*bufreq);
 			break;
 		case HFI_INDEX_EXTRADATA_INPUT_CROP:
@@ -106,9 +120,15 @@ static void iris_hfi_gen1_read_changed_params(struct iris_inst *inst,
 	pixmp_ip->width = event.width;
 	pixmp_ip->height = event.height;
 
-	pixmp_op->width = ALIGN(event.width, 128);
-	pixmp_op->height = ALIGN(event.height, 32);
-	pixmp_op->plane_fmt[0].bytesperline = ALIGN(event.width, 128);
+	if (pixmp_op->pixelformat == V4L2_PIX_FMT_QC10C) {
+		pixmp_op->width = roundup(event.width, 192);
+		pixmp_op->height = ALIGN(event.height, 16);
+	} else {
+		pixmp_op->width = ALIGN(event.width, 128);
+		pixmp_op->height = ALIGN(event.height, 32);
+	}
+	pixmp_op->plane_fmt[0].bytesperline =
+		iris_vdec_raw_stride(event.width, pixmp_op->pixelformat);
 	pixmp_op->plane_fmt[0].sizeimage = iris_get_buffer_size(inst, BUF_OUTPUT);
 
 	matrix_coeff =  FIELD_GET(GENMASK(7, 0), event.colour_space);
@@ -199,6 +219,7 @@ static void iris_hfi_gen1_event_seq_changed(struct iris_inst *inst,
 	}
 
 	iris_hfi_gen1_read_changed_params(inst, pkt);
+	iris_vb2_vp9_release_high_iova_hole(inst);
 
 	if (inst->state != IRIS_INST_ERROR && !(inst->sub_state & IRIS_INST_SUB_FIRST_IPSC)) {
 
@@ -403,8 +424,12 @@ static void iris_hfi_gen1_session_ftb_done(struct iris_inst *inst, void *packet)
 	u32 hfi_flags;
 	u32 offset;
 	u64 timestamp_us = 0;
+	bool m2m_stopped;
+	bool recycle_output = false;
+	bool seek_was_pending = false;
 	bool found = false;
 	u32 flags = 0;
+	int ret;
 
 	if (inst->domain == DECODER) {
 		timestamp_hi = uncom_pkt->time_stamp_hi;
@@ -494,6 +519,48 @@ static void iris_hfi_gen1_session_ftb_done(struct iris_inst *inst, void *packet)
 	}
 	buf->timestamp = timestamp_us;
 
+	if (inst->domain == DECODER && buf->type == BUF_OUTPUT &&
+	    inst->core->iris_platform_data->legacy_vpu5) {
+		/* The leading hidden frame in a VP9 superframe shares its timestamp. */
+		if (inst->codec == V4L2_PIX_FMT_VP9 && filled_len &&
+		    inst->pending_output &&
+		    inst->pending_output->timestamp == timestamp_us)
+			ret = iris_vdec_recycle_pending_output(inst);
+		else
+			ret = iris_vdec_complete_pending_output(inst);
+		if (ret)
+			goto error;
+		seek_was_pending = inst->seek_timestamp_pending;
+		if (inst->seek_hold_frames)
+			inst->seek_hold_frames--;
+	}
+
+	if (inst->domain == DECODER && buf->type == BUF_OUTPUT && filled_len) {
+		if (inst->core->iris_platform_data->legacy_vpu5 &&
+		    inst->codec != V4L2_PIX_FMT_VP9 &&
+		    (hfi_flags & (HFI_BUFFERFLAG_DATACORRUPT |
+				  HFI_BUFFERFLAG_DROP_FRAME)) &&
+		    inst->corrupt_output_drops < IRIS1_MAX_CORRUPT_OUTPUT_DROPS) {
+			inst->corrupt_output_drops++;
+			recycle_output = true;
+		} else {
+			inst->corrupt_output_drops = 0;
+			recycle_output = iris_vdec_discard_stale_frame(inst, timestamp_us);
+		}
+	}
+
+	if (recycle_output) {
+		buf->data_size = 0;
+		buf->flags = 0;
+		buf->timestamp = 0;
+		buf->attr &= ~(BUF_ATTR_QUEUED | BUF_ATTR_DEQUEUED |
+			       BUF_ATTR_BUFFER_DONE);
+		ret = iris_queue_buffer(inst, buf);
+		if (ret)
+			goto error;
+		return;
+	}
+
 	switch (pic_type) {
 	case HFI_GEN1_PICTURE_IDR:
 	case HFI_GEN1_PICTURE_I:
@@ -516,21 +583,93 @@ static void iris_hfi_gen1_session_ftb_done(struct iris_inst *inst, void *packet)
 	buf->attr |= BUF_ATTR_DEQUEUED;
 	buf->attr |= BUF_ATTR_BUFFER_DONE;
 
-	if (hfi_flags & HFI_BUFFERFLAG_DATACORRUPT)
+	if ((hfi_flags & HFI_BUFFERFLAG_DATACORRUPT) &&
+	    !(inst->domain == DECODER && buf->type == BUF_OUTPUT && filled_len &&
+	      inst->core->iris_platform_data->legacy_vpu5 &&
+	      inst->codec == V4L2_PIX_FMT_VP9))
 		flags |= V4L2_BUF_FLAG_ERROR;
 
-	if (hfi_flags & HFI_BUFFERFLAG_DROP_FRAME)
+	if ((hfi_flags & HFI_BUFFERFLAG_DROP_FRAME) &&
+	    !(inst->domain == DECODER && buf->type == BUF_OUTPUT && filled_len &&
+	      inst->core->iris_platform_data->legacy_vpu5 &&
+	      inst->codec == V4L2_PIX_FMT_VP9))
 		flags |= V4L2_BUF_FLAG_ERROR;
 
 	buf->flags |= flags;
+
+	if (inst->domain == DECODER && buf->type == BUF_OUTPUT && filled_len &&
+	    inst->core->iris_platform_data->legacy_vpu5 &&
+	    !seek_was_pending &&
+	    (inst->codec == V4L2_PIX_FMT_VP9 ||
+	     (!(hfi_flags & (HFI_BUFFERFLAG_DATACORRUPT |
+			     HFI_BUFFERFLAG_DROP_FRAME)) &&
+	      inst->seek_hold_frames))) {
+		ret = iris_vdec_hold_output(inst, buf);
+		if (ret)
+			goto error;
+		return;
+	}
 
 	iris_vb2_buffer_done(inst, buf);
 
 	return;
 
 error:
+	m2m_stopped = v4l2_m2m_has_stopped(m2m_ctx);
+	if (inst->streamoff_pending || inst->last_buffer_dequeued || m2m_stopped)
+		return;
+
 	iris_inst_change_state(inst, IRIS_INST_ERROR);
 	dev_err(core->dev, "error in ftb done\n");
+}
+
+static void
+iris_hfi_gen1_session_property_info(struct iris_inst *inst, void *packet)
+{
+	struct hfi_msg_session_property_info_pkt *pkt = packet;
+	struct hfi_buffer_requirements *req;
+	enum iris_buffer_type buffer_type;
+	u32 req_bytes, count, i;
+
+	req_bytes = pkt->shdr.hdr.size - sizeof(*pkt);
+	if (pkt->num_properties != 1 ||
+	    pkt->property != HFI_PROPERTY_CONFIG_BUFFER_REQUIREMENTS ||
+	    !req_bytes || req_bytes % sizeof(*req)) {
+		dev_err(inst->core->dev, "malformed VPU5 buffer requirements response\n");
+		complete(&inst->completion);
+		return;
+	}
+
+	count = req_bytes / sizeof(*req);
+	req = (struct hfi_buffer_requirements *)pkt->data;
+	for (i = 0; i < count; i++, req++) {
+		switch (req->type) {
+		case HFI_BUFFER_OUTPUT:
+			if (inst->domain != DECODER || !iris_split_mode_enabled(inst))
+				continue;
+			buffer_type = BUF_DPB;
+			break;
+		case HFI_BUFFER_INTERNAL_PERSIST_1:
+			buffer_type = BUF_PERSIST;
+			break;
+		case HFI_BUFFER_INTERNAL_SCRATCH:
+			buffer_type = BUF_BIN;
+			break;
+		case HFI_BUFFER_INTERNAL_SCRATCH_1:
+			buffer_type = BUF_SCRATCH_1;
+			break;
+		case HFI_BUFFER_INTERNAL_SCRATCH_2:
+			buffer_type = BUF_SCRATCH_2;
+			break;
+		default:
+			continue;
+		}
+
+		inst->fw_buffer_sizes[buffer_type] =
+			max(inst->fw_buffer_sizes[buffer_type], req->size);
+	}
+
+	complete(&inst->completion);
 }
 
 struct iris_hfi_gen1_response_pkt_info {
@@ -578,6 +717,10 @@ static const struct iris_hfi_gen1_response_pkt_info pkt_infos[] = {
 	{
 	 .pkt = HFI_MSG_SESSION_FILL_BUFFER,
 	 .pkt_sz = sizeof(struct hfi_msg_session_fbd_compressed_pkt),
+	},
+	{
+	 .pkt = HFI_MSG_SESSION_PROPERTY_INFO,
+	 .pkt_sz = sizeof(struct hfi_msg_session_property_info_pkt),
 	},
 	{
 	 .pkt = HFI_MSG_SESSION_FLUSH,
@@ -652,6 +795,8 @@ static void iris_hfi_gen1_handle_response(struct iris_core *core, void *response
 			iris_hfi_gen1_session_etb_done(inst, hdr);
 		} else if (hdr->pkt_type == HFI_MSG_SESSION_FILL_BUFFER) {
 			iris_hfi_gen1_session_ftb_done(inst, hdr);
+		} else if (hdr->pkt_type == HFI_MSG_SESSION_PROPERTY_INFO) {
+			iris_hfi_gen1_session_property_info(inst, hdr);
 		} else {
 			struct hfi_msg_session_hdr_pkt *shdr;
 

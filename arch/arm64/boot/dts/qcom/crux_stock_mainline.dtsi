@@ -1,0 +1,242 @@
+/* 原厂 fdt 里有的、主线驱动能认的那部分（值取自 /root/stock_crux.dts） */
+
+&i2c4 {
+	bq27z561@55 {
+		compatible = "ti,bq27z561";
+		reg = <0x55>;
+		bq,charge-full-design = <4000000>;
+		bq,recharge-voltage   = <4380>;
+		bq,soc_decimal_rate = <
+			0  38
+			10 35
+			20 33
+			30 33
+			40 33
+			50 33
+			60 33
+			70 30
+			80 25
+			90 20
+			95 10
+			99  5 >;
+		bq,cold_thermal_seq = <
+			1      0  100 1700
+			2  (-300)   0 1000 >;
+	};
+	cs35l41: cs35l41@40 {
+		#sound-dai-cells = <1>;
+		compatible = "cirrus,cs35l41";
+		VA-supply = <&cs35l41_vreg>;
+		VP-supply = <&cs35l41_vreg>;
+		reset-gpios = <&tlmm 89 GPIO_ACTIVE_HIGH>;
+		cs,cdc-reset-gpio = <&tlmm 89 0x01>;
+		reg = <0x40>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&cs35l41_int_default>;
+		interrupt-parent = <&tlmm>;
+		interrupts = <10 8>;
+
+		cirrus,temp-warn_threshold = <3>;
+		cirrus,boost-peak-milliamp = <4000>;
+		cirrus,boost-ind-nanohenry = <1000>;
+		cirrus,boost-cap-microfarad = <15>;
+		cirrus,gpio-config2 {
+			cirrus,gpio-src-select = <0x4>;
+			cirrus,gpio-output-enable;
+		};
+	};
+};
+
+&spi1 {
+	irled@0 {
+		compatible = "ir-spi";
+		reg = <0x0>;
+		status = "ok";
+		spi-max-frequency = <19200000>;
+	};
+};
+
+&tlmm {
+		cs35l41_int_default: cs35l41_int_default {
+			mux {
+				pins = "gpio10";
+				function = "gpio";
+			};
+			config {
+				pins = "gpio10";
+				bias-pull-up;
+				drive-strength = <8>;
+				input-enable;
+			};
+		};
+		msm_gpio_119: msm_gpio_119 {
+			mux {
+				 pins = "gpio119";
+				 function = "gpio";
+			};
+
+			config {
+				pins = "gpio119";
+				drive-strength = <2>;
+				bias-disable;
+				output-low;
+			};
+		};
+		msm_gpio_119_output_high: msm_gpio_119_output_high {
+			mux {
+				pins = "gpio119";
+				function = "gpio";
+			};
+
+			config {
+				pins = "gpio119";
+				drive-strength = <2>;
+				bias-disable;
+				output-high;
+			};
+		};
+		msm_gpio_27: msm_gpio_27 {
+			mux {
+				 pins = "gpio27";
+				 function = "gpio";
+			};
+
+			config {
+				pins = "gpio27";
+				drive-strength = <2>;
+				bias-pull-up;
+				input-enable;
+			};
+		};
+		msm_gpio_6: msm_gpio_6 {
+			mux {
+				 pins = "gpio6";
+				 function = "gpio";
+			};
+
+			config {
+				pins = "gpio6";
+				drive-strength = <2>;
+				bias-disable;
+				output-low;
+			};
+		};
+		msm_gpio_6_output_high: msm_gpio_6_output_high {
+			mux {
+				pins = "gpio6";
+				function = "gpio";
+			};
+
+			config {
+				pins = "gpio6";
+				drive-strength = <2>;
+				bias-disable;
+				output-high;
+			};
+		};
+		nfc_clk_req_active: nfc_clk_req_active {
+			/* active state */
+			mux {
+				/* 113: NFC CLOCK REQUEST */
+				pins = "gpio113";
+				function = "gpio";
+			};
+
+			config {
+				pins = "gpio113";
+				drive-strength = <2>; /* 2 MA */
+				bias-pull-up;
+			};
+		};
+		nfc_clk_req_suspend: nfc_clk_req_suspend {
+			/* sleep state */
+			mux {
+				/* 113: NFC CLOCK REQUEST */
+				pins = "gpio113";
+				function = "gpio";
+			};
+
+			config {
+				pins = "gpio113";
+				drive-strength = <2>; /* 2 MA */
+				bias-disable;
+			};
+		};
+		nfc_enable_active: nfc_enable_active {
+			/* active state */
+			mux {
+				/* 36: NFC ENABLE 48:ESE Enable */
+				pins = "gpio36", "gpio48";
+				function = "gpio";
+			};
+
+			config {
+				pins = "gpio41", "gpio48";
+				drive-strength = <2>; /* 2 MA */
+				bias-pull-up;
+			};
+		};
+		nfc_enable_suspend: nfc_enable_suspend {
+			/* sleep state */
+			mux {
+				/* 36: NFC ENABLE 48:ESE Enable */
+				pins = "gpio36", "gpio48";
+				function = "gpio";
+			};
+
+			config {
+				pins = "gpio41", "gpio48";
+				drive-strength = <2>; /* 2 MA */
+				bias-disable;
+			};
+		};
+		nfc_int_active: nfc_int_active {
+			/* active state */
+			mux {
+				/* GPIO 47 NFC Read Interrupt */
+				pins = "gpio47";
+				function = "gpio";
+			};
+
+			config {
+				pins = "gpio47";
+				drive-strength = <2>; /* 2 MA */
+				bias-pull-up;
+			};
+		};
+		nfc_int_suspend: nfc_int_suspend {
+			/* sleep state */
+			mux {
+				/* GPIO 47 NFC Read Interrupt */
+				pins = "gpio47";
+				function = "gpio";
+			};
+
+			config {
+				pins = "gpio47";
+				drive-strength = <2>; /* 2 MA */
+				bias-pull-up;
+			};
+		};
+	ts_active: ts-active-state {
+		pins = "gpio122", "gpio12";
+		function = "gpio";
+		drive-strength = <8>;
+		bias-pull-up;
+	};
+	ts_int_suspend: ts-int-suspend-state {
+		pins = "gpio122";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-pull-down;
+		input-enable;
+	};
+	ts_reset_suspend: ts-reset-suspend-state {
+		pins = "gpio12";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+		output-low;
+	};
+};
+

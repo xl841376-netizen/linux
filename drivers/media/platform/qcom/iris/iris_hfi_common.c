@@ -82,6 +82,8 @@ int iris_hfi_core_init(struct iris_core *core)
 	ret = hfi_ops->sys_init(core);
 	if (ret)
 		return ret;
+	if (core->iris_platform_data->legacy_vpu5)
+		return 0;
 
 	ret = hfi_ops->sys_image_version(core);
 	if (ret)
@@ -92,7 +94,11 @@ int iris_hfi_core_init(struct iris_core *core)
 
 irqreturn_t iris_hfi_isr(int irq, void *data)
 {
+	struct iris_core *core = data;
+
 	disable_irq_nosync(irq);
+	if (core && core->iris_platform_data->legacy_vpu5)
+		iris_vpu_clear_interrupt(core);
 
 	return IRQ_WAKE_THREAD;
 }
@@ -106,7 +112,8 @@ irqreturn_t iris_hfi_isr_handler(int irq, void *data)
 
 	mutex_lock(&core->lock);
 	pm_runtime_mark_last_busy(core->dev);
-	iris_vpu_clear_interrupt(core);
+	if (!core->iris_platform_data->legacy_vpu5)
+		iris_vpu_clear_interrupt(core);
 	mutex_unlock(&core->lock);
 
 	core->hfi_sys_ops->sys_hfi_response_handler(core);
@@ -120,6 +127,15 @@ irqreturn_t iris_hfi_isr_handler(int irq, void *data)
 int iris_hfi_pm_suspend(struct iris_core *core)
 {
 	int ret;
+
+	/*
+	 * Legacy VPU5 keeps the controller powered and the firmware running,
+	 * so there is no power collapse to prepare.  iris_vpu_prepare_pc()
+	 * deliberately returns -EAGAIN, which made runtime PM retry every
+	 * autosuspend interval and spam "failed to suspend".
+	 */
+	if (core->iris_platform_data->legacy_vpu5)
+		return 0;
 
 	ret = iris_vpu_prepare_pc(core);
 	if (ret) {
@@ -146,6 +162,10 @@ int iris_hfi_pm_resume(struct iris_core *core)
 {
 	const struct iris_hfi_sys_ops *ops = core->hfi_sys_ops;
 	int ret;
+
+	/* Nothing was powered off on legacy VPU5; do not reboot the running VPU. */
+	if (core->iris_platform_data->legacy_vpu5)
+		return 0;
 
 	ret = iris_vpu_power_on(core);
 	if (ret)

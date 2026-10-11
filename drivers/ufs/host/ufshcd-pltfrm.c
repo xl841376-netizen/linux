@@ -692,15 +692,21 @@ int ufshcd_pltfrm_init(struct platform_device *pdev,
 		return err;
 	}
 
+	/* [crux] Ensure power domain (GDSC) is up before any HW register access.
+	 * Upstream ufshcd has no explicit genpd power-on; on Qualcomm the
+	 * UFS GDSC must be ON or controller reads hang the bus.
+	 * Ported from the 6.17 crux tree (verified there).
+	 */
+	pm_runtime_set_active(dev);
+	pm_runtime_enable(dev);
+	pm_runtime_get_sync(dev);
+
 	err = ufshcd_init(hba, mmio_base, irq);
 	if (err) {
 		dev_err_probe(dev, err, "Initialization failed with error %d\n",
 			      err);
 		return err;
 	}
-
-	pm_runtime_set_active(dev);
-	pm_runtime_enable(dev);
 
 	return 0;
 }

@@ -1099,7 +1099,13 @@ static int fastrpc_get_args(u32 kernel, struct fastrpc_invoke_ctx *ctx)
 
 	ctx->msg_sz = pkt_size;
 
-	if (ctx->fl->sctx->sid)
+	/*
+	 * [crux] 传感器 PD(SENSORS_PD) 不经自己的 context bank 访问消息缓冲区，
+	 * 必须从预留池拿真实物理地址（DSP 只认 32 位地址、4GB 以下）。
+	 * 摘自 hotdog-linux-bringup 0148-misc-fastrpc-allocate-sensors-
+	 * messages-from-the-reserved-pool。
+	 */
+	if (ctx->fl->sctx->sid && ctx->fl->pd != SENSORS_PD)
 		err = fastrpc_buf_alloc(ctx->fl, dev, pkt_size, &ctx->buf);
 	else
 		err = fastrpc_remote_heap_alloc(ctx->fl, dev, pkt_size, &ctx->buf);
@@ -2591,7 +2597,7 @@ static int fastrpc_rpmsg_probe(struct rpmsg_device *rpdev)
 			err = qcom_scm_assign_mem(res.start, resource_size(&res), &src_perms,
 				    data->vmperms, data->vmcount);
 			if (err)
-				goto err_free_data;
+				dev_warn(rdev, "assign memory to SDSP failed: %d\n", err);
 		}
 
 	}

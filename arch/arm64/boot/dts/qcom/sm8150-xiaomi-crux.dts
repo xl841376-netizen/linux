@@ -1,0 +1,1712 @@
+// SPDX-License-Identifier: BSD-3-Clause
+/*
+ * Copyright (c) 2017-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2019, Linaro Limited
+ */
+
+/dts-v1/;
+
+#include <dt-bindings/regulator/qcom,rpmh-regulator.h>
+#include <dt-bindings/pinctrl/qcom,pmic-gpio.h>
+#include <dt-bindings/gpio/gpio.h>
+#include "sm8150.dtsi"
+#include "pm8150.dtsi"
+#include "pm8150b.dtsi"
+#include "pm8150l.dtsi"
+#include <dt-bindings/soc/qcom,apr.h>
+#include <dt-bindings/sound/qcom,q6afe.h>
+#include <dt-bindings/sound/qcom,q6asm.h>
+#include <dt-bindings/sound/qcom,wcd934x.h>
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/input/input.h>
+#include <dt-bindings/interconnect/qcom,sm8150.h>
+
+/ {
+	model = "Xiaomi Mi 9 Pro 5G (crux)";
+	compatible = "xiaomi,crux", "qcom,sm8150";
+	chassis-type = "handset";
+
+	aliases {
+		serial0 = &uart2;
+	};
+
+	chosen {
+		stdout-path = "serial0:115200n8";
+	};
+
+	vph_pwr: vph-pwr-regulator {
+		compatible = "regulator-fixed";
+		regulator-name = "vph_pwr";
+		regulator-min-microvolt = <3700000>;
+		regulator-max-microvolt = <3700000>;
+	};
+
+	/*
+	 * Apparently RPMh does not provide support for PM8150 S4 because it
+	 * is always-on; model it as a fixed regulator.
+	 */
+	vreg_s4a_1p8: pm8150-s4 {
+		compatible = "regulator-fixed";
+		regulator-name = "vreg_s4a_1p8";
+
+		regulator-min-microvolt = <1800000>;
+		regulator-max-microvolt = <1800000>;
+
+		regulator-always-on;
+		regulator-boot-on;
+
+		vin-supply = <&vph_pwr>;
+	};
+
+	/* [crux] 复刻原厂 tavil 卡拓扑：MI2S BE 用 dummy codec */
+	dummy_codec: dummy-codec {
+		compatible = "linux,spdif-dit";
+		#sound-dai-cells = <0>;
+		status = "okay";
+	};
+
+
+	thermal_zones: thermal-zones {
+		pm8150b-ibat-lvl0 {
+			polling-delay-passive = <0>;
+			polling-delay = <0>;
+			thermal-sensors = <&pm8150b_bcl 0>;
+
+			trips {
+				pm8150b_ibat_lvl0: ibat-lvl0 {
+					temperature = <4500>;
+					hysteresis = <200>;
+					type = "passive";
+				};
+			};
+		};
+		pm8150b-ibat-lvl1 {
+			polling-delay-passive = <0>;
+			polling-delay = <0>;
+			thermal-sensors = <&pm8150b_bcl 1>;
+
+			trips {
+				pm8150b_ibat_lvl1: ibat-lvl1 {
+					temperature = <5000>;
+					hysteresis = <200>;
+					type = "passive";
+				};
+			};
+		};
+		pm8150b-vbat-lvl0 {
+			polling-delay-passive = <0>;
+			polling-delay = <0>;
+			thermal-sensors = <&pm8150b_bcl 2>;
+
+			trips {
+				pm8150b_vbat_lvl0: vbat-lvl0 {
+					temperature = <3000>;
+					hysteresis = <200>;
+					type = "passive";
+				};
+			};
+		};
+		pm8150b-vbat-lvl1 {
+			polling-delay-passive = <0>;
+			polling-delay = <0>;
+			thermal-sensors = <&pm8150b_bcl 3>;
+
+			trips {
+				pm8150b_vbat_lvl1: vbat-lvl1 {
+					temperature = <2800>;
+					hysteresis = <200>;
+					type = "passive";
+				};
+			};
+		};
+		pm8150b-vbat-lvl2 {
+			polling-delay-passive = <0>;
+			polling-delay = <0>;
+			thermal-sensors = <&pm8150b_bcl 4>;
+
+			trips {
+				pm8150b_vbat_lvl2: vbat-lvl2 {
+					temperature = <2600>;
+					hysteresis = <200>;
+					type = "passive";
+				};
+			};
+		};
+		pm8150b-bcl-lvl0 {
+			polling-delay-passive = <100>;
+			polling-delay = <0>;
+			thermal-sensors = <&pm8150b_bcl 5>;
+
+			trips {
+				pm8150b_bcl_lvl0: bcl-lvl0 {
+					temperature = <1>;
+					hysteresis = <200>;
+					type = "passive";
+				};
+			};
+			cooling-maps {
+				map0 {
+					trip = <&pm8150b_bcl_lvl0>;
+					cooling-device = <&cpu4 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
+					                 <&cpu5 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
+					                 <&cpu6 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
+					                 <&cpu7 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+				};
+			};
+		};
+		pm8150b-bcl-lvl1 {
+			polling-delay-passive = <100>;
+			polling-delay = <0>;
+			thermal-sensors = <&pm8150b_bcl 6>;
+
+			trips {
+				pm8150b_bcl_lvl1: bcl-lvl1 {
+					temperature = <1>;
+					hysteresis = <200>;
+					type = "passive";
+				};
+			};
+			cooling-maps {
+				map0 {
+					trip = <&pm8150b_bcl_lvl1>;
+					cooling-device = <&cpu0 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
+					                 <&cpu1 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
+					                 <&cpu2 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
+					                 <&cpu3 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
+					                 <&cpu4 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
+					                 <&cpu5 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
+					                 <&cpu6 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
+					                 <&cpu7 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+				};
+			};
+		};
+		pm8150b-bcl-lvl2 {
+			polling-delay-passive = <100>;
+			polling-delay = <0>;
+			thermal-sensors = <&pm8150b_bcl 7>;
+
+			trips {
+				pm8150b_bcl_lvl2: bcl-lvl2 {
+					temperature = <1>;
+					hysteresis = <200>;
+					type = "passive";
+				};
+			};
+			cooling-maps {
+				map0 {
+					trip = <&pm8150b_bcl_lvl2>;
+					cooling-device = <&cpu0 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
+					                 <&cpu1 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
+					                 <&cpu2 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
+					                 <&cpu3 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
+					                 <&cpu4 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
+					                 <&cpu5 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
+					                 <&cpu6 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
+					                 <&cpu7 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+				};
+			};
+		};
+		pm8150l-vph-lvl0 {
+			polling-delay-passive = <0>;
+			polling-delay = <0>;
+			thermal-sensors = <&pm8150l_bcl 2>;
+
+			trips {
+				pm8150l_vph_lvl0: vph-lvl0 {
+					temperature = <3000>;
+					hysteresis = <200>;
+					type = "passive";
+				};
+			};
+		};
+		pm8150l-vph-lvl1 {
+			polling-delay-passive = <0>;
+			polling-delay = <0>;
+			thermal-sensors = <&pm8150l_bcl 3>;
+
+			trips {
+				pm8150l_vph_lvl1: vph-lvl1 {
+					temperature = <2750>;
+					hysteresis = <200>;
+					type = "passive";
+				};
+			};
+		};
+		pm8150l-vph-lvl2 {
+			polling-delay-passive = <0>;
+			polling-delay = <0>;
+			thermal-sensors = <&pm8150l_bcl 4>;
+
+			trips {
+				pm8150l_vph_lvl2: vph-lvl2 {
+					temperature = <2500>;
+					hysteresis = <200>;
+					type = "passive";
+				};
+			};
+		};
+		pm8150l-bcl-lvl0 {
+			polling-delay-passive = <100>;
+			polling-delay = <0>;
+			thermal-sensors = <&pm8150l_bcl 5>;
+
+			trips {
+				pm8150l_bcl_lvl0: bcl-lvl0 {
+					temperature = <1>;
+					hysteresis = <200>;
+					type = "passive";
+				};
+			};
+			cooling-maps {
+				map0 {
+					trip = <&pm8150l_bcl_lvl0>;
+					cooling-device = <&cpu4 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
+					                 <&cpu5 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
+					                 <&cpu6 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
+					                 <&cpu7 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+				};
+			};
+		};
+		pm8150l-bcl-lvl1 {
+			polling-delay-passive = <100>;
+			polling-delay = <0>;
+			thermal-sensors = <&pm8150l_bcl 6>;
+
+			trips {
+				pm8150l_bcl_lvl1: bcl-lvl1 {
+					temperature = <1>;
+					hysteresis = <200>;
+					type = "passive";
+				};
+			};
+			cooling-maps {
+				map0 {
+					trip = <&pm8150l_bcl_lvl1>;
+					cooling-device = <&cpu0 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
+					                 <&cpu1 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
+					                 <&cpu2 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
+					                 <&cpu3 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
+					                 <&cpu4 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
+					                 <&cpu5 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
+					                 <&cpu6 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
+					                 <&cpu7 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+				};
+			};
+		};
+		pm8150l-bcl-lvl2 {
+			polling-delay-passive = <100>;
+			polling-delay = <0>;
+			thermal-sensors = <&pm8150l_bcl 7>;
+
+			trips {
+				pm8150l_bcl_lvl2: bcl-lvl2 {
+					temperature = <1>;
+					hysteresis = <200>;
+					type = "passive";
+				};
+			};
+			cooling-maps {
+				map0 {
+					trip = <&pm8150l_bcl_lvl2>;
+					cooling-device = <&cpu0 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
+					                 <&cpu1 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
+					                 <&cpu2 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
+					                 <&cpu3 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
+					                 <&cpu4 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
+					                 <&cpu5 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
+					                 <&cpu6 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
+					                 <&cpu7 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+				};
+			};
+		};
+	};
+};
+
+&spmi_bus {
+	pmic@0 {
+		crux_revid_0: revid@100 {
+			compatible = "qcom,qpnp-revid";
+			reg = <0x100 0x100>;
+		};
+
+		clock-controller@5b00 {
+			compatible = "qcom,spmi-clkdiv";
+			reg = <0x5b00 0x200>;
+			#clock-cells = <1>;
+			qcom,num-clkdivs = <2>;
+			clock-output-names = "pm8150_div_clk1", "pm8150_div_clk2";
+			clocks = <&rpmhcc RPMH_CXO_CLK>;
+			clock-names = "xo";
+		};
+
+		crux_sdam_2: sdam@b100 {
+			compatible = "qcom,spmi-sdam";
+			reg = <0xb100 0x100>;
+			#address-cells = <1>;
+			#size-cells = <1>;
+			rtc_offset: rtc-offset@bc {
+				reg = <0xbc 0x4>;
+			};
+
+			/* [crux] 关机裁决记录：4字节，PMIC 常电域，扛得住真断电。 */
+			crux_verdict: crux-verdict@90 {
+				reg = <0x90 0x4>;
+			};
+		};
+	};
+
+	pmic@2 {
+		crux_revid_2: revid@100 {
+			compatible = "qcom,qpnp-revid";
+			reg = <0x100 0x100>;
+		};
+
+		clock-controller@6000 {
+			compatible = "qcom,spmi-clkdiv";
+			reg = <0x6000 0x100>;
+			#clock-cells = <1>;
+			qcom,num-clkdivs = <1>;
+			clock-output-names = "pm8150b_div_clk1";
+			clocks = <&rpmhcc RPMH_CXO_CLK>;
+			clock-names = "xo";
+		};
+
+		pm8150b_bcl: bcl@1d00 {
+			compatible = "qcom,bcl-v5";
+			reg = <0x1d00 0x100>;
+			interrupts = <0x02 0x1d 0x00 0x00 0x02 0x1d 0x01 0x00 0x02 0x1d 0x02 0x00>;
+			interrupt-names = "bcl-lvl0", "bcl-lvl1", "bcl-lvl2";
+			#thermal-sensor-cells = <1>;
+		};
+
+		pm8150b_pdphy: qcom,usb-pdphy@1700 {
+			compatible = "qcom,qpnp-pdphy";
+			reg = <0x1700 0x100>;
+			vdd-pdphy-supply = <&vreg_l2a_3p1>;
+			vbus-supply = <&pm8150b_vbus>;
+			interrupts = <0x2 0x17 0x0 IRQ_TYPE_EDGE_RISING>,
+				     <0x2 0x17 0x1 IRQ_TYPE_EDGE_RISING>,
+				     <0x2 0x17 0x2 IRQ_TYPE_EDGE_RISING>,
+				     <0x2 0x17 0x3 IRQ_TYPE_EDGE_RISING>,
+				     <0x2 0x17 0x4 IRQ_TYPE_EDGE_RISING>,
+				     <0x2 0x17 0x5 IRQ_TYPE_EDGE_RISING>,
+				     <0x2 0x17 0x6 IRQ_TYPE_EDGE_RISING>,
+				     <0x2 0x17 0x7 IRQ_TYPE_EDGE_RISING>;
+			interrupt-names = "sig-tx", "sig-rx", "msg-tx", "msg-rx",
+				  "msg-tx-failed", "msg-tx-discarded", "msg-rx-discarded", "fr-swap";
+			qcom,default-sink-caps = <5000 3000>, <9000 3000>, <12000 2250>;
+		};
+
+	};
+
+	pmic@3 {
+		crux_lpg_3: pwms@b100 {
+			compatible = "qcom,pwm-lpg";
+			reg = <0xb100 0x200>;
+			reg-names = "lpg-base";
+			#pwm-cells = <2>;
+			qcom,num-lpg-channels = <2>;
+		};
+
+		leds@d000 {
+			compatible = "qcom,tri-led";
+			reg = <0xd000 0x100>;
+			nvmem-names = "pbs_sdam";
+			nvmem = <&crux_sdam_2>;
+
+			hr_led1 {
+				label = "hr_led1";
+				pwms = <&crux_lpg_3 0 1000000>;
+				led-sources = <0>;
+			};
+
+			hr_led2 {
+				label = "hr_led2";
+				pwms = <&crux_lpg_3 1 1000000>;
+				led-sources = <1>;
+			};
+		};
+
+		haptics@c000 {
+			compatible = "qcom,haptics";
+			reg = <0xc000 0x100>;
+			interrupts = <0x03 0xc0 0x00 0x03 0x03 0xc0 0x01 0x03>;
+			interrupt-names = "hap-sc-irq", "hap-play-irq";
+			qcom,actuator-type = "lra";
+			qcom,vmax-mv = <0xd48>;
+			qcom,play-rate-us = <0x1a0b>;
+			qcom,lra-resonance-sig-shape = "sine";
+			qcom,lra-auto-resonance-mode = "qwd";
+			qcom,lra-allow-variable-play-rate;
+
+			wf_0 {
+				qcom,effect-id = <0>;
+				qcom,wf-vmax-mv = <0xe10>;
+				qcom,wf-pattern = [3e 3e 3e];
+				qcom,wf-play-rate-us = <0x1a0b>;
+				qcom,wf-brake-pattern = <0x1000000>;
+				qcom,lra-auto-resonance-disable;
+			};
+
+			wf_1 {
+				qcom,effect-id = <1>;
+				qcom,wf-vmax-mv = <0xe10>;
+				qcom,wf-pattern = <0x7e7e0202 0x2020202>;
+				qcom,wf-play-rate-us = <0x1be7>;
+				qcom,wf-repeat-count = <2>;
+				qcom,wf-s-repeat-count = <1>;
+				qcom,lra-auto-resonance-disable;
+			};
+
+			wf_2 {
+				qcom,effect-id = <2>;
+				qcom,wf-vmax-mv = <0xe10>;
+				qcom,wf-pattern = [7e 7e];
+				qcom,wf-play-rate-us = <0xfa0>;
+				qcom,lra-auto-resonance-disable;
+			};
+
+			wf_3 {
+				qcom,effect-id = <3>;
+				qcom,wf-vmax-mv = <0xe10>;
+				qcom,wf-pattern = [7e 7e 7e];
+				qcom,wf-play-rate-us = <0x1a0b>;
+				qcom,lra-auto-resonance-disable;
+			};
+
+			wf_4 {
+				qcom,effect-id = <4>;
+				qcom,wf-vmax-mv = <0xe10>;
+				qcom,wf-pattern = [7e 7e];
+				qcom,wf-play-rate-us = <0x1388>;
+				qcom,lra-auto-resonance-disable;
+			};
+
+			wf_5 {
+				qcom,effect-id = <5>;
+				qcom,wf-vmax-mv = <0xe10>;
+				qcom,wf-pattern = [7e 7e 7e];
+				qcom,wf-play-rate-us = <0x1a0b>;
+				qcom,wf-brake-pattern = <0x3000000>;
+				qcom,lra-auto-resonance-disable;
+			};
+		};
+	};
+
+	pmic@4 {
+		crux_revid_4: revid@100 {
+			compatible = "qcom,qpnp-revid";
+			reg = <0x100 0x100>;
+		};
+
+		clock-controller@5b00 {
+			compatible = "qcom,spmi-clkdiv";
+			reg = <0x5b00 0x100>;
+			#clock-cells = <1>;
+			qcom,num-clkdivs = <1>;
+			clock-output-names = "pm8150l_div_clk1";
+			clocks = <&rpmhcc RPMH_CXO_CLK>;
+			clock-names = "xo";
+		};
+
+		pm8150l_bcl: bcl@3d00 {
+			compatible = "qcom,bcl-v5";
+			reg = <0x3d00 0x100>;
+			interrupts = <0x04 0x3d 0x00 0x00 0x04 0x3d 0x01 0x00 0x04 0x3d 0x02 0x00>;
+			interrupt-names = "bcl-lvl0", "bcl-lvl1", "bcl-lvl2";
+			#thermal-sensor-cells = <1>;
+		};
+	};
+
+	pmic@5 {
+		crux_lpg_5: pwms@b100 {
+			compatible = "qcom,pwm-lpg";
+			reg = <0xb100 0x300 0xb000 0x100>;
+			reg-names = "lpg-base", "lut-base";
+			#pwm-cells = <2>;
+			qcom,num-lpg-channels = <3>;
+			qcom,lut-patterns = <0 1 2 3 4 5 7 9 11 13 15 13 11 9 7 5 4 3 2 1 0>;
+		};
+
+		leds@d000 {
+			compatible = "qcom,tri-led";
+			reg = <0xd000 0x100>;
+
+			red {
+				label = "white";
+				pwms = <&crux_lpg_5 0 1000000>;
+				led-sources = <0>;
+			};
+
+			green {
+				label = "green";
+				pwms = <&crux_lpg_5 1 1000000>;
+				led-sources = <1>;
+				linux,default-trigger = "timer";
+				status = "disabled";
+			};
+
+			blue {
+				label = "blue";
+				pwms = <&crux_lpg_5 2 1000000>;
+				led-sources = <2>;
+			};
+		};
+
+		lcdb@ec00 {
+			compatible = "qcom,qpnp-lcdb-regulator";
+			#address-cells = <1>;
+			#size-cells = <1>;
+			reg = <0xec00 0x100>;
+			interrupts = <0x05 0xec 0x01 0x01>;
+			interrupt-names = "sc-irq";
+			qcom,pmic-revid = <&crux_revid_4>;
+			qcom,voltage-step-ramp;
+			status = "okay";
+
+			ldo {
+				label = "ldo";
+				regulator-name = "lcdb_ldo";
+				regulator-min-microvolt = <4000000>;
+				regulator-max-microvolt = <6000000>;
+			};
+
+			ncp {
+				label = "ncp";
+				regulator-name = "lcdb_ncp";
+				regulator-min-microvolt = <4000000>;
+				regulator-max-microvolt = <6000000>;
+			};
+
+			bst {
+				label = "bst";
+				regulator-name = "lcdb_bst";
+				regulator-min-microvolt = <4700000>;
+				regulator-max-microvolt = <6275000>;
+			};
+		};
+
+	};
+};
+
+
+&apps_rsc {
+	regulators-0 {
+		compatible = "qcom,pm8150-rpmh-regulators";
+		qcom,pmic-id = "a";
+
+		vdd-s1-supply = <&vph_pwr>;
+		vdd-s2-supply = <&vph_pwr>;
+		vdd-s3-supply = <&vph_pwr>;
+		vdd-s4-supply = <&vph_pwr>;
+		vdd-s5-supply = <&vph_pwr>;
+		vdd-s6-supply = <&vph_pwr>;
+		vdd-s7-supply = <&vph_pwr>;
+		vdd-s8-supply = <&vph_pwr>;
+		vdd-s9-supply = <&vph_pwr>;
+		vdd-s10-supply = <&vph_pwr>;
+
+		vdd-l1-l8-l11-supply = <&vreg_s6a_0p9>;
+		vdd-l2-l10-supply = <&vreg_bob>;
+		vdd-l3-l4-l5-l18-supply = <&vreg_s6a_0p9>;
+		vdd-l6-l9-supply = <&vreg_s8c_1p3>;
+		vdd-l7-l12-l14-l15-supply = <&vreg_s5a_2p0>;
+		vdd-l13-l16-l17-supply = <&vreg_bob>;
+
+		vreg_s5a_2p0: smps5 {
+			regulator-min-microvolt = <1904000>;
+			regulator-max-microvolt = <2000000>;
+		};
+
+		vreg_s6a_0p9: smps6 {
+			regulator-min-microvolt = <920000>;
+			regulator-max-microvolt = <1128000>;
+		};
+
+		vdda_wcss_pll:
+		vreg_l1a_0p75: ldo1 {
+			regulator-min-microvolt = <752000>;
+			regulator-max-microvolt = <752000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+
+		vdd_pdphy:
+		vdda_usb_hs_3p1:
+		vreg_l2a_3p1: ldo2 {
+			regulator-min-microvolt = <3072000>;
+			regulator-max-microvolt = <3072000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+
+		vreg_l3a_0p8: ldo3 {
+			regulator-min-microvolt = <480000>;
+			regulator-max-microvolt = <932000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+
+		vdd_usb_hs_core:
+		vdda_csi_0_0p9:
+		vdda_csi_1_0p9:
+		vdda_csi_2_0p9:
+		vdda_csi_3_0p9:
+		vdda_dsi_0_0p9:
+		vdda_dsi_1_0p9:
+		vdda_dsi_0_pll_0p9:
+		vdda_dsi_1_pll_0p9:
+		vdda_pcie_1ln_core:
+		vdda_pcie_2ln_core:
+		vdda_pll_hv_cc_ebi01:
+		vdda_pll_hv_cc_ebi23:
+		vdda_qrefs_0p875_5:
+		vdda_sp_sensor:
+		vdda_ufs_2ln_core_1:
+		vdda_ufs_2ln_core_2:
+		vdda_usb_ss_dp_core_1:
+		vdda_usb_ss_dp_core_2:
+		vdda_qlink_lv:
+		vdda_qlink_lv_ck:
+		vreg_l5a_0p875: ldo5 {
+			regulator-min-microvolt = <880000>;
+			regulator-max-microvolt = <880000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+
+		vreg_l6a_1p2: ldo6 {
+			regulator-min-microvolt = <1200000>;
+			regulator-max-microvolt = <1200000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+
+		vreg_l7a_1p8: ldo7 {
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <1800000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+
+		vddpx_10:
+		vreg_l9a_1p2: ldo9 {
+			regulator-min-microvolt = <1200000>;
+			regulator-max-microvolt = <1200000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+
+		vreg_l10a_2p5: ldo10 {
+			regulator-min-microvolt = <2504000>;
+			regulator-max-microvolt = <2960000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+
+		vreg_l11a_0p8: ldo11 {
+			regulator-min-microvolt = <800000>;
+			regulator-max-microvolt = <800000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+
+		vdd_qfprom:
+		vdd_qfprom_sp:
+		vdda_apc_cs_1p8:
+		vdda_gfx_cs_1p8:
+		vdda_usb_hs_1p8:
+		vdda_qrefs_vref_1p8:
+		vddpx_10_a:
+		vreg_l12a_1p8: ldo12 {
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <1800000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+
+		vreg_l13a_2p7: ldo13 {
+			regulator-min-microvolt = <2704000>;
+			regulator-max-microvolt = <2704000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+
+		vreg_l14a_1p8: ldo14 {
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <1880000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+
+		vreg_l15a_1p7: ldo15 {
+			regulator-min-microvolt = <1704000>;
+			regulator-max-microvolt = <1704000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+
+		vreg_l16a_2p7: ldo16 {
+			regulator-min-microvolt = <2704000>;
+			regulator-max-microvolt = <2960000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+
+		vreg_l17a_3p0: ldo17 {
+			regulator-min-microvolt = <2856000>;
+			regulator-max-microvolt = <3008000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+	};
+
+	regulators-1 {
+		compatible = "qcom,pm8150l-rpmh-regulators";
+		qcom,pmic-id = "c";
+
+		vdd-s1-supply = <&vph_pwr>;
+		vdd-s2-supply = <&vph_pwr>;
+		vdd-s3-supply = <&vph_pwr>;
+		vdd-s4-supply = <&vph_pwr>;
+		vdd-s5-supply = <&vph_pwr>;
+		vdd-s6-supply = <&vph_pwr>;
+		vdd-s7-supply = <&vph_pwr>;
+		vdd-s8-supply = <&vph_pwr>;
+
+		vdd-l1-l8-supply = <&vreg_s4a_1p8>;
+		vdd-l2-l3-supply = <&vreg_s8c_1p3>;
+		vdd-l4-l5-l6-supply = <&vreg_bob>;
+		vdd-l7-l11-supply = <&vreg_bob>;
+		vdd-l9-l10-supply = <&vreg_bob>;
+
+		vdd-bob-supply = <&vph_pwr>;
+		vdd-flash-supply = <&vreg_bob>;
+		vdd-rgb-supply = <&vreg_bob>;
+
+		vreg_bob: bob {
+			regulator-min-microvolt = <3008000>;
+			regulator-max-microvolt = <4000000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_AUTO>;
+			regulator-allow-bypass;
+		};
+
+		vreg_s8c_1p3: smps8 {
+			regulator-min-microvolt = <1352000>;
+			regulator-max-microvolt = <1352000>;
+		};
+
+		vreg_l1c_1p8: ldo1 {
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <1800000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+
+		vdda_wcss_adcdac_1:
+		vdda_wcss_adcdac_22:
+		vreg_l2c_1p3: ldo2 {
+			regulator-min-microvolt = <1304000>;
+			regulator-max-microvolt = <1304000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+
+		vdda_hv_ebi0:
+		vdda_hv_ebi1:
+		vdda_hv_ebi2:
+		vdda_hv_ebi3:
+		vdda_hv_refgen0:
+		vdda_qlink_hv_ck:
+		vdda_mipi_dsi0_1p2:
+		vreg_l3c_1p2: ldo3 {
+			regulator-min-microvolt = <1200000>;
+			regulator-max-microvolt = <1200000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+
+		vddpx_5:
+		vreg_l4c_1p8: ldo4 {
+			regulator-min-microvolt = <1704000>;
+			regulator-max-microvolt = <2928000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+
+		vddpx_6:
+		vreg_l5c_1p8: ldo5 {
+			regulator-min-microvolt = <1704000>;
+			regulator-max-microvolt = <2928000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+
+		vddpx_2:
+		vreg_l6c_2p9: ldo6 {
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <2960000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+
+		vreg_l7c_3p0: ldo7 {
+			regulator-min-microvolt = <2856000>;
+			regulator-max-microvolt = <3104000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+
+		vreg_l8c_1p8: ldo8 {
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <1800000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+
+		vreg_l9c_2p9: ldo9 {
+			regulator-min-microvolt = <2704000>;
+			regulator-max-microvolt = <2960000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+
+		vreg_l10c_3p3: ldo10 {
+			regulator-min-microvolt = <3000000>;
+			regulator-max-microvolt = <3312000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+
+		vreg_l11c_3p3: ldo11 {
+			regulator-min-microvolt = <3000000>;
+			regulator-max-microvolt = <3312000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+	};
+
+	regulators-2 {
+		compatible = "qcom,pm8009-rpmh-regulators";
+		qcom,pmic-id = "f";
+
+		vdd-s1-supply = <&vph_pwr>;
+		vdd-s2-supply = <&vreg_bob>;
+
+		vdd-l2-supply = <&vreg_s8c_1p3>;
+		vdd-l5-l6-supply = <&vreg_bob>;
+
+		vreg_l2f_1p2: ldo2 {
+			regulator-min-microvolt = <1200000>;
+			regulator-max-microvolt = <1200000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+
+		vreg_l5f_2p85: ldo5 {
+			regulator-min-microvolt = <2800000>;
+			regulator-max-microvolt = <2800000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+
+		vreg_l6f_2p85: ldo6 {
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+			regulator-min-microvolt = <2856000>;
+			regulator-max-microvolt = <2856000>;
+		};
+	};
+};
+
+&gmu {
+	status = "okay";
+};
+
+&gpu {
+	status = "okay";
+};
+
+&gpu_zap_shader {
+	firmware-name = "qcom/sm8150/a640_zap.mbn";
+};
+
+&pon {
+	mode-bootloader = <0x2>;
+	mode-recovery = <0x1>;
+};
+
+&pon_pwrkey {
+	status = "okay";
+};
+
+&pon_resin {
+	status = "okay";
+
+	linux,code = <KEY_VOLUMEDOWN>;
+};
+
+&qupv3_id_1 {
+	status = "okay";
+};
+
+&remoteproc_adsp {
+	status = "okay";
+	firmware-name = "qcom/sm8150/xiaomi/crux/adsp.mbn";
+	glink-edge {
+		fastrpc {
+			memory-region = <&fastrpc_mem>;
+			qcom,vmids = <QCOM_SCM_VMID_LPASS QCOM_SCM_VMID_ADSP_HEAP>;
+		};
+	};
+};
+
+&remoteproc_cdsp {
+	status = "okay";
+	firmware-name = "qcom/sm8150/xiaomi/crux/cdsp.mbn";
+};
+
+&remoteproc_mpss {
+	status = "okay";
+	firmware-name = "qcom/sm8150/modem.mbn";
+};
+
+&remoteproc_slpi {
+	status = "okay";
+	firmware-name = "qcom/sm8150/xiaomi/crux/slpi.mbn";
+
+	glink-edge {
+		qrtr_requests {
+			qcom,glink-channels = "IPCRTR";
+		};
+
+		fastrpc {
+			memory-region = <&fastrpc_mem>;
+			qcom,vmids = <QCOM_SCM_VMID_HLOS QCOM_SCM_VMID_SSC_Q6 QCOM_SCM_VMID_ADSP_Q6>;
+		};
+	};
+};
+
+&tlmm {
+	/*
+	 * [crux] TrustZone 死区 GPIO。
+	 * 本机 GPIO0-5 / 83-88 / 90-94 / 96-97 / 124 / 126-129 / 170-174 属 TZ 保留区，
+	 * 读它们的寄存器（0x3d00000-0x3d04000、0x3d7e000-0x3d82000 等）会触发异步 SError。
+	 * 2026-10-01 实测：7.3 原生只带 mtp 的 <0 4>,<126 4>，在 gpiochip 注册逐线读方向
+	 * （msm_gpio_get_direction）时直接 SError -> arm64_serror_panic，整机 panic。
+	 * 这里把死区线全部标为 reserved：gpiolib 在 gpiochip_add_data 里先按该属性建
+	 * valid_mask，注册循环就不会去读这些线。
+	 * 名单来源：我们 6.17 树里已验证过的死区集合（sm8150_reserved_gpios 同名单）。
+	 * 注意：7.3 上游 ngpios=176，行 175 是 UFS_RESET（本板 reset-gpios 用它），
+	 * 不能保留，故不含 175。
+	 */
+	gpio-reserved-ranges = <0 6>, <83 6>, <90 5>, <96 2>, <124 1>, <126 4>, <170 5>;
+		quat_mi2s_active: quat_mi2s_active {
+			mux {
+				pins = "gpio137", "gpio138";
+				function = "qua_mi2s";
+			};
+
+			config {
+				pins = "gpio137", "gpio138";
+				drive-strength = <8>;   /* 8 mA */
+				bias-disable;           /* NO PULL */
+				output-high;
+			};
+		};
+		quat_mi2s_sd0_active: quat_mi2s_sd0_active {
+			mux {
+				pins = "gpio139";
+				function = "qua_mi2s";
+			};
+
+			config {
+				pins = "gpio139";
+				drive-strength = <8>;
+				bias-disable;
+			};
+		};
+};
+
+&uart2 {
+	status = "okay";
+};
+
+&ufs_mem_hc {
+	status = "okay";
+
+	reset-gpios = <&tlmm 175 GPIO_ACTIVE_LOW>;
+
+	vcc-supply = <&vreg_l10a_2p5>;
+	vcc-max-microamp = <750000>;
+	vccq-supply = <&vreg_l9a_1p2>;
+	vccq-max-microamp = <700000>;
+	vccq2-supply = <&vreg_s4a_1p8>;
+	vccq2-max-microamp = <750000>;
+};
+
+&ufs_mem_phy {
+	status = "okay";
+
+	vdda-phy-supply = <&vdda_ufs_2ln_core_1>;
+	vdda-pll-supply = <&vreg_l3c_1p2>;
+};
+
+&usb_1_hsphy {
+	status = "okay";
+	vdda-pll-supply = <&vdd_usb_hs_core>;
+	vdda33-supply = <&vdda_usb_hs_3p1>;
+	vdda18-supply = <&vdda_usb_hs_1p8>;
+	/* [crux] 照 6.17 DTB：HS PHY 参数覆盖 */
+	qcom,param-override-seq = <0x33 0x70 0x2c 0x74>;
+};
+
+&usb_1_qmpphy {
+	/* [crux] 照 6.17：只跑 HS，SS PHY 关掉 */
+	status = "disabled";
+	vdda-phy-supply = <&vdda_usb_ss_dp_core_1>;
+	vdda-pll-supply = <&vreg_l3c_1p2>;
+};
+
+&usb_1 {
+	status = "okay";
+	/* [crux] 照 6.17：无 SS PHY，时钟走 UTMI */
+	qcom,select-utmi-as-pipe-clk;
+};
+
+&usb_1_dwc3 {
+	dr_mode = "peripheral";
+	/* [crux] 照 6.17：只挂 HS PHY，最高 high-speed */
+	phys = <&usb_1_hsphy>;
+	phy-names = "usb2-phy";
+	maximum-speed = "high-speed";
+};
+
+&wifi {
+	status = "okay";
+
+	vdd-0.8-cx-mx-supply = <&vdda_wcss_pll>;
+	vdd-1.8-xo-supply = <&vreg_l7a_1p8>;
+	vdd-1.3-rfa-supply = <&vdda_wcss_adcdac_1>;
+	vdd-3.3-ch0-supply = <&vreg_l11c_3p3>;
+};
+
+/* ===== [crux 7.3 原生] 以下内容来自用户提供的原厂 DTB（stock_crux.dts），不来自 6.17 ===== */
+
+#include "sm8150-xiaomi-crux-stock.dtsi"
+#include "crux_x50_from_stock.dtsi"
+#include "crux_stock_mainline.dtsi"
+#include "crux_stock_downstream.dtsi"
+#include "crux_local.dtsi"
+#include "crux_display.dtsi"
+
+/ {
+	/* 内存图：按原厂 DTB 的 /memory（0x80000000 3GB 段 + 高位段） */
+	memory@80000000 {
+		device_type = "memory";
+		reg = <0x0 0x80000000 0x0 0x39900000>,
+		      <0x1 0x80000000 0x2 0x00000000>,
+		      <0x0 0xc0000000 0x0 0xc0000000>;
+	};
+
+	/* IPA（7.3 的 sm8150.dtsi 没有 SM8150 的 IPA 节点） */
+	soc {
+		ipa: ipa@1e40000 {
+			compatible = "qcom,sm8150-ipa";
+			iommus = <&apps_smmu 0x520 0x0>,
+				 <&apps_smmu 0x521 0x0>,
+				 <&apps_smmu 0x522 0x0>;
+			reg = <0 0x01e40000 0 0x7000>,
+			      <0 0x01e47000 0 0x2800>,
+			      <0 0x01e04000 0 0x28000>;
+			reg-names = "ipa-reg", "ipa-shared", "gsi";
+			interrupts-extended = <&intc GIC_SPI 311 IRQ_TYPE_EDGE_RISING>,
+					      <&intc GIC_SPI 432 IRQ_TYPE_LEVEL_HIGH>,
+					      <&ipa_smp2p_in 0 IRQ_TYPE_EDGE_RISING>,
+					      <&ipa_smp2p_in 1 IRQ_TYPE_EDGE_RISING>;
+			interrupt-names = "ipa", "gsi", "ipa-clock-query", "ipa-setup-ready";
+			clocks = <&rpmhcc RPMH_IPA_CLK>;
+			clock-names = "core";
+			interconnects = <&aggre2_noc MASTER_IPA 0 &mc_virt SLAVE_EBI_CH0 0>,
+					<&aggre2_noc MASTER_IPA 0 &system_noc SLAVE_OCIMEM 0>,
+					<&gem_noc MASTER_AMPSS_M0 0 &config_noc SLAVE_IPA_CFG 0>;
+			interconnect-names = "memory", "imem", "config";
+			qcom,smem-states = <&ipa_smp2p_out 0>, <&ipa_smp2p_out 1>;
+			qcom,smem-state-names = "ipa-clock-enabled-valid", "ipa-clock-enabled";
+			status = "disabled";
+		};
+	};
+};
+
+/* IPA 的两条 smp2p 通道（主线 dtsi 里没有） */
+&{/smp2p-mpss} {
+	ipa_smp2p_out: ipa-ap-to-modem {
+		qcom,entry-name = "ipa";
+		#qcom,smem-state-cells = <1>;
+	};
+
+	ipa_smp2p_in: ipa-modem-to-ap {
+		qcom,entry-name = "ipa";
+		interrupt-controller;
+		#interrupt-cells = <2>;
+	};
+};
+
+/* 内建 modem：固件路径按 crux 实际位置 */
+&remoteproc_mpss {
+	firmware-name = "qcom/sm8150/xiaomi/crux/modem.mbn";
+};
+
+/*
+ * [crux] rmtfs_mem：上游给的 0x89b00000 落在本机 TrustZone 里（tz_mem 0x86200000
+ * 长 0x5500000，一直到 0x8B700000），PAS 校验必然失败。挪到 TZ 与
+ * mpss_mem(0x8E000000) 之间的空档；client-id 必须与适配版 rmtfs 里 hardcode 的一致。
+ */
+/delete-node/ &rmtfs_mem;
+
+/* 外挂 X50 所在的 PCIe1（原厂 DTB 里是 pcie1 + MHI 控制器） */
+&pcie1 {
+	status = "okay";
+
+	/*
+	 * [crux] 关键：PERST 极性。主线 sm8150.dtsi 写的是 GPIO_ACTIVE_HIGH，
+	 * 而驱动 assert(val=1)/deassert(val=0) 走逻辑值 —— 在 ACTIVEL_HIGH 下
+	 * "deassert" 会把 PERST 拉到物理低（=复位有效），EP 永远被按在复位里
+	 * （现象：qcom-pcie "Device not found"、0001 总线上只有根端口）。
+	 * 6.17 实测正确值是 GPIO_ACTIVE_LOW。2026-10-03 重搭 7.3 DT 时漏了这条。
+	 */
+	perst-gpios = <&tlmm 102 GPIO_ACTIVE_LOW>;
+
+	/* 供电：6.17 验证过的两条轨（避免一直走 dummy regulator） */
+	vdda-supply = <&vreg_l1c_1p8>;
+	vddpe-3v3-supply = <&vreg_l10c_3p3>;
+
+	/* PERST(102) 的 pin config：主线的 pcie1_default_state 只有 clkreq/wake */
+	pinctrl-names = "default";
+	pinctrl-0 = <&pcie1_default_state>, <&crux_pcie1_perst_default>,
+		    <&crux_ap2mdm_active>, <&crux_mdm2ap_active>;
+
+	max-link-speed = <3>;
+
+	/* 链路一直停在 L0，避免读写踩空（6.17 验证过的稳定档位） */
+	qcom,no-l0s-supported;
+	qcom,no-l1-supported;
+	qcom,no-l1ss-supported;
+
+	/*
+	 * [暂缓] 端点上电曾想交给 PCI Power Control（pwrctrl），但主线 7.3 的
+	 * 通用 provider（pci-pwrctrl-slot）只匹配 "pciclass,0604" 与
+	 * "pci1912,0014"，没有 provider 认 "pci17cb,0305"，于是
+	 * pci_pwrctrl_power_on_devices() 一直返回 -EPROBE_DEFER，
+	 * pcie1 报 "cannot initialize host" 而起不来（2026-10-03 实测）。
+	 * 等确定路线（把 supply 挂到 root port 子节点并给 pciclass,0604，
+	 * 或者给 SDX50M 写一个 pwrseq/pwrctrl provider）再恢复。
+	 */
+};
+
+/* [crux] PERST 脚的 pinctrl（照原厂 pcie1_perst_default） */
+&tlmm {
+	crux_pcie1_perst_default: crux-pcie1-perst-default {
+		perst-pins {
+			pins = "gpio102";
+			function = "gpio";
+			drive-strength = <2>;
+			bias-pull-down;
+		};
+	};
+};
+
+/*
+ * PCIe1 的 PHY：原厂把 PHY 并进 pcie 节点里（reg-names 带 phy、vreg-1.8/vreg-0.9），
+ * 主线是独立节点 phy@1c0e000，默认 disabled。不开的话 pcie1 的 phys 句柄指向一个
+ * 不存在的设备，fw_devlink 会把它永久挂在延迟探测里（现象：1c08000.pcie 无驱动绑定）。
+ * 供电按原厂同一对轨：vreg-0.9 = pm8150_l5（0.856V，实测 phy vdda-phy），
+ * vreg-1.8 = pm8150l_l3（1.2V，实测 phy vdda-pll）。
+ */
+&pcie1_phy {
+	status = "okay";
+	vdda-phy-supply = <&vreg_l5a_0p875>;
+	vdda-pll-supply = <&vreg_l9a_1p2>;
+};
+
+/* ===== reserved-memory：主线默认图与本机不一致的，按原厂 DTB 改（地址/长度照原厂） ===== */
+/delete-node/ &xbl_mem;
+/delete-node/ &mpss_mem;
+/delete-node/ &venus_mem;
+/delete-node/ &slpi_mem;
+/delete-node/ &ipa_fw_mem;
+/delete-node/ &ipa_gsi_mem;
+/delete-node/ &gpu_mem;
+/delete-node/ &spss_mem;
+/delete-node/ &cdsp_mem;
+
+&{/reserved-memory} {
+	/* [crux] 改回 0x85d00000：原厂值 0x85e00000+0x140000 会盖住
+	 * aop_mem(0x85f00000) 和 cmd-db(0x85f20000) 两块保留区，
+	 * 6.17 一直用的是 0x85d00000 且 cmd-db/RPMH 正常。
+	 */
+	xbl_mem: memory@85d00000 {
+		no-map;
+		reg = <0x0 0x85d00000 0x0 0x140000>;
+	};
+
+	/* 原厂 removed_regions 给到 0x5500000，比主线的 tz_mem 大 */
+	tz_mem: memory@86200000 {
+		no-map;
+		reg = <0x0 0x86200000 0x0 0x5500000>;
+	};
+
+	/*
+	 * [crux] rmtfs_mem1（client-id=1）@0x9a500000。
+	 * 6.17 能起 adsp 的关键之一：这块被 SCM 授权成功后
+	 * /dev/qcom_rmtfs_mem1 才存在，PAS 校验才过。
+	 * 7.3 板级此前只留了 client-id=4，缺这一个。
+	 */
+	rmtfs_mem1: memory@9a500000 {
+		compatible = "qcom,rmtfs-mem";
+		reg = <0x0 0x9a500000 0x0 0x300000>;
+		no-map;
+		qcom,client-id = <1>;
+		qcom,vmid = <15>;
+	};
+
+	/* [crux] rmtfs_mem 与 qseecom_mem 共用 0x9e400000（同 6.17），3MB，client-id=4 */
+	rmtfs_mem: memory@9e400000 {
+		compatible = "qcom,rmtfs-mem";
+		reg = <0x0 0x9e400000 0x0 0x300000>;
+		no-map;
+		qcom,client-id = <4>;
+		qcom,vmid = <QCOM_SCM_VMID_MSS_MSA>;
+	};
+
+	/* 原厂 pil_adsp_region 是 0x2200000 */
+	adsp_mem: memory@8be00000 {
+		no-map;
+		reg = <0x0 0x8be00000 0x0 0x2200000>;
+	};
+
+	mpss_mem: memory@8e000000 {
+		no-map;
+		reg = <0x0 0x8e000000 0x0 0x9600000>;
+	};
+
+	venus_mem: memory@97600000 {
+		no-map;
+		reg = <0x0 0x97600000 0x0 0x500000>;
+	};
+
+	slpi_mem: memory@97b00000 {
+		no-map;
+		reg = <0x0 0x97b00000 0x0 0x1400000>;
+	};
+
+	ipa_fw_mem: memory@98f00000 {
+		no-map;
+		reg = <0x0 0x98f00000 0x0 0x10000>;
+	};
+
+	ipa_gsi_mem: memory@98f10000 {
+		no-map;
+		reg = <0x0 0x98f10000 0x0 0x5000>;
+	};
+
+	gpu_mem: memory@98f15000 {
+		no-map;
+		reg = <0x0 0x98f15000 0x0 0x2000>;
+	};
+
+	spss_mem: memory@99000000 {
+		no-map;
+		reg = <0x0 0x99000000 0x0 0x100000>;
+	};
+
+	/* [crux] fastrpc 堆 = 原厂 ION ADSP HEAP 背后那块 CMA。
+	 * 32MB 对齐、16MB；参数必须与原厂 adsp_mem 一致，否则
+	 * qcom_scm_assign_mem 会被拒（-EINVAL/-22）。
+	 */
+	fastrpc_mem: fastrpc-mem {
+		compatible = "shared-dma-pool";
+		alloc-ranges = <0x0 0x00000000 0x0 0xffffffff>;
+		reusable;
+		alignment = <0x0 0x2000000>;
+		size = <0x0 0x1000000>;
+	};
+
+	cdsp_mem: memory@99100000 {
+		no-map;
+		reg = <0x0 0x99100000 0x0 0x1400000>;
+	};
+
+	/* 原厂多出来的几块 */
+	cdsp_sec_mem: memory@a4c00000 {
+		no-map;
+		reg = <0x0 0xa4c00000 0x0 0x3c00000>;
+	};
+
+	splash_mem: memory@9c000000 {
+		reg = <0x0 0x9c000000 0x0 0x2400000>;
+	};
+
+	ramdump_fb_mem: memory@af000000 {
+		no-map;
+		reg = <0x0 0xaf000000 0x0 0x1000000>;
+	};
+
+	pil_buffer_p2: memory@a0000000 {
+		no-map;
+		reg = <0x0 0xa0000000 0x0 0x1000000>;
+	};
+
+	pil_buffer_p1: memory@a1000000 {
+		no-map;
+		reg = <0x0 0xa1000000 0x0 0x2c00000>;
+	};
+
+	/* X50 的 MHI DMA 池（原厂 addr-win 尾部） */
+	mhi_region: mhi-region@a3c00000 {
+		compatible = "shared-dma-pool";
+		reg = <0x0 0xa3c00000 0x0 0x1000000>;
+		no-map;
+	};
+};
+
+/*
+ * ===== [主线通用做法] X50 相关 pin/line 的声明式描述 =====
+ * ② gpio-hog：启动即需保持、又没有驱动拥有的静态电平（ap2mdm-status 常高、
+ *    ap2mdm-errfatal 常低）。挂了 hog 之后用户态就不能再抢这两根线（这是
+ *    预期的：稳态由内核保证，不再靠用户进程持有）。
+ * ③ gpio-line-names：给线起名，用户态/libgpiod 可以按名字找线。
+ * ④ 扁平写法的 pin group：主线 pinctrl-msm 只认扁平写法（pins/function/
+ *    drive-strength/bias-* 直接挂节点上）；原厂那套 mux{}/config{} 子节点
+ *    写法主线会静默忽略（实测 pinconf-pins 为空）。
+ */
+&tlmm {
+	gpio-line-names =
+	/* 0-9 */
+	"", "", "", "", "", "", "", "", "", "",
+	/* 10-19 */
+	"", "", "", "", "", "", "", "", "", "",
+	/* 20-29 */
+	"", "", "", "", "", "", "", "", "", "",
+	/* 30-39 */
+	"", "", "", "", "", "", "", "", "", "",
+	/* 40-49 */
+	"", "", "", "", "", "", "", "", "", "",
+	/* 50-59 */
+	"", "", "", "mdm2ap-errfatal", "", "", "", "", "", "",
+	/* 60-69 */
+	"", "", "", "", "", "", "", "", "", "",
+	/* 70-79 */
+	"", "", "", "", "", "", "", "", "", "",
+	/* 80-89 */
+	"", "", "", "", "", "", "", "", "", "",
+	/* 90-99 */
+	"", "", "", "", "", "", "", "", "", "",
+	/* 100-109 */
+	"", "", "pcie1-perst", "pcie1-clkreq", "pcie1-wake", "", "", "", "", "",
+	/* 110-119 */
+	"", "", "", "", "", "", "", "", "", "",
+	/* 120-129 */
+	"", "", "", "", "", "", "", "", "", "",
+	/* 130-139 */
+	"", "", "", "", "", "ap2mdm-status", "", "", "", "",
+	/* 140-149 */
+	"", "ap2mdm-errfatal", "mdm2ap-status", "", "", "", "", "", "", "",
+	/* 150-159 */
+	"", "", "", "", "", "", "", "", "", "",
+	/* 160-169 */
+	"", "", "", "", "", "", "", "", "", "",
+	/* 170-175 */
+	"", "", "", "", "", "";
+
+	/* X50 用到的三组（原厂 ap2mdm/mdm2ap 的电气真值；扁平写法） */
+	crux_ap2mdm_active: crux-ap2mdm-active {
+		pins = "gpio135", "gpio141";
+		function = "gpio";
+		drive-strength = <16>;
+		bias-disable;
+	};
+
+	crux_mdm2ap_active: crux-mdm2ap-active {
+		pins = "gpio142", "gpio53";
+		function = "gpio";
+		drive-strength = <8>;
+		bias-disable;
+	};
+
+	/*
+	 * [不做 hog] 原以为 ap2mdm-status / ap2mdm-errfatal 是静态电平，
+	 * 用 gpio-hog 交给内核最稳。实测：hog 让 status 从开机就一直高，
+	 * 破坏了模组要的“先复位脉冲、之后 status 才拉高”的先后关系
+	 * （原厂 CAF 也是 toggle_soft_reset -> msleep(150) -> STATUS=1），
+	 * 结果链路停在 "Device found, but not active"，端点不出来。
+	 * 故这两根线继续由用户态按序驱动（x50-up / x50-gpio）。
+	 */
+};
+
+&pm8150l_gpios {
+	/* pm8150l gpio9 = X50 的 AP2MDM_SOFT_RESET（复位脉冲仍由用户态打，
+	 * 所以这里只做命名，不做 hog，否则就没法再驱动它了） */
+	gpio-line-names =
+		/* 1-12（PMIC GPIO 是 1 基，名字按 1..12 给） */
+		"", "", "", "", "", "", "", "", "ap2mdm-soft-reset", "", "", "";
+};
+
+/*
+ * ===== [主线通用做法] 槽位/端点上电交给 PCI Power Control =====
+ * 主线 7.3 的通用 provider（drivers/pci/pwrctrl/generic.c，driver 名
+ * pci-pwrctrl-slot）只匹配 "pciclass,0604"（PCI 桥/槽位）与 "pci1912,0014"。
+ * 主线 DT 里的写法就是把它挂在 root port 的子节点 pcie@0 上（见 imx8mm/imx95）。
+ * 这样 qcom_pcie_host_init() 会在 **释放 PERST 之前** 调
+ * pci_pwrctrl_power_on_devices()，把这些轨打开。
+ * 注：此前试过在控制器下另建一个 compatible="pci17cb,0305" 的端点节点，
+ * 因为没有任何 provider 匹配它，反而让控制器一直 -EPROBE_DEFER（cannot
+ * initialize host）——已撤掉，改用这个格式。
+ */
+&{/soc@0/pcie@1c08000/pcie@0} {
+	compatible = "pciclass,0604";
+	vdd-supply = <&vreg_l1c_1p8>;
+	vdd33-supply = <&vreg_l10c_3p3>;
+};
+
+/* crux: Venus / Iris（SM8150 / Iris1 / legacy VPU5 / HFI Gen1）
+ * 驱动改用内核 iris 驱动，compatible 为 qcom,sm8150-iris。
+ * 参数依据：nabu-iris（同 SoC 已验证跑通）与 crux 原厂 downstream。
+ * 要点：SM8150 v2 的 VIDC 流 ID 在 0x23xx（不是 v1 的 0x13xx）；
+ *      OPP 六档必须与 VideoCC 电压表一一对应；
+ *      性能域投票用 CX。
+ */
+&soc {
+	venus: video-codec@aa00000 {
+		compatible = "qcom,sm8150-iris";
+		reg = <0 0x0aa00000 0 0x100000>;
+		interrupts = <GIC_SPI 174 IRQ_TYPE_LEVEL_HIGH>;
+
+		power-domains = <&videocc VENUS_GDSC>,
+				<&videocc VCODEC0_GDSC>,
+				<&videocc VCODEC1_GDSC>,
+				<&rpmhpd SM8150_CX>;
+		power-domain-names = "venus", "vcodec0", "vcodec1", "cx";
+
+		operating-points-v2 = <&venus_opp_table>;
+
+		clocks = <&videocc VIDEO_CC_MVSC_CORE_CLK>,
+			 <&videocc VIDEO_CC_IRIS_AHB_CLK>,
+			 <&gcc GCC_VIDEO_AXIC_CLK>,
+			 <&videocc VIDEO_CC_MVS0_CORE_CLK>,
+			 <&gcc GCC_VIDEO_AXI0_CLK>,
+			 <&videocc VIDEO_CC_MVS1_CORE_CLK>,
+			 <&gcc GCC_VIDEO_AXI1_CLK>;
+		clock-names = "core", "iface", "bus",
+			      "vcodec0_core", "vcodec0_bus",
+			      "vcodec1_core", "vcodec1_bus";
+
+		resets = <&gcc GCC_VIDEO_AXIC_CLK_BCR>,
+			 <&videocc VIDEO_CC_MVSC_CORE_CLK_BCR>,
+			 <&gcc GCC_VIDEO_AXI0_CLK_BCR>,
+			 <&gcc GCC_VIDEO_AXI1_CLK_BCR>;
+		reset-names = "bus", "core", "vcodec0_bus", "vcodec1_bus";
+
+		interconnects = <&mmss_noc MASTER_VIDEO_P0 0 &mc_virt SLAVE_EBI_CH0 0>,
+				<&gem_noc MASTER_AMPSS_M0 0 &config_noc SLAVE_VENUS_CFG 0>;
+		interconnect-names = "video-mem", "cpu-cfg";
+
+		iommus = <&apps_smmu 0x2300 0x60>;
+		memory-region = <&venus_mem>;
+
+		firmware-name = "qcom/sm8150/xiaomi/crux/venus.mbn";
+
+		status = "okay";
+
+		video-core0 {
+			compatible = "venus-decoder";
+		};
+
+		video-core1 {
+			compatible = "venus-encoder";
+		};
+
+		venus_opp_table: opp-table {
+			compatible = "operating-points-v2";
+
+			opp-200000000 {
+				opp-hz = /bits/ 64 <200000000>;
+				required-opps = <&rpmhpd_opp_min_svs>;
+			};
+
+			opp-240000000 {
+				opp-hz = /bits/ 64 <240000000>;
+				required-opps = <&rpmhpd_opp_low_svs>;
+			};
+
+			opp-338000000 {
+				opp-hz = /bits/ 64 <338000000>;
+				required-opps = <&rpmhpd_opp_svs>;
+			};
+
+			opp-365000000 {
+				opp-hz = /bits/ 64 <365000000>;
+				required-opps = <&rpmhpd_opp_svs_l1>;
+			};
+
+			opp-444000000 {
+				opp-hz = /bits/ 64 <444000000>;
+				required-opps = <&rpmhpd_opp_nom>;
+			};
+
+			opp-533000000 {
+				opp-hz = /bits/ 64 <533000000>;
+				required-opps = <&rpmhpd_opp_turbo>;
+			};
+		};
+	};
+};
+
+/* ===== [crux] 音频（照 6.17 合入）===== */
+&sound {
+	compatible = "qcom,sm8150-sndcard";
+	model = "Xiaomi Mi9 Pro";
+	pinctrl-0 = <&quat_mi2s_active &quat_mi2s_sd0_active>;
+	pinctrl-names = "default";
+
+	/* crux: 按 raphael(同 SoC 已工作) 结构；fully_routed 卡必须有 widgets+audio-routing */
+	widgets = "Speaker", "Earpiece", "Headphone", "Headphones";
+
+	audio-routing =
+		"RX_BIAS", "MCLK",
+		"AMIC2", "MIC BIAS2",
+		"Earpiece", "EAR",
+		"Headphones", "HPHL",
+		"Headphones", "HPHR",
+		"MM_DL1", "MultiMedia1 Playback",
+		"MM_DL2", "MultiMedia2 Playback",
+		"MultiMedia3 Capture", "MM_UL3";
+
+	mm1-dai-link {
+		link-name = "MultiMedia1";
+		cpu {
+			sound-dai = <&q6asmdai MSM_FRONTEND_DAI_MULTIMEDIA1>;
+		};
+	};
+
+	mm2-dai-link {
+		link-name = "MultiMedia2";
+		cpu {
+			sound-dai = <&q6asmdai MSM_FRONTEND_DAI_MULTIMEDIA2>;
+		};
+	};
+
+	mm3-dai-link {
+		link-name = "MultiMedia3";
+		cpu {
+			sound-dai = <&q6asmdai MSM_FRONTEND_DAI_MULTIMEDIA3>;
+		};
+	};
+
+	slim-dai-link {
+		link-name = "SLIM Playback";
+		cpu {
+			sound-dai = <&q6afedai SLIMBUS_0_RX>;
+		};
+		platform {
+			sound-dai = <&q6routing>;
+		};
+		codec {
+			sound-dai = <&wcd9340 0>;
+		};
+	};
+
+	slimcap-dai-link {
+		link-name = "SLIM Capture";
+		cpu {
+			sound-dai = <&q6afedai SLIMBUS_0_TX>;
+		};
+		platform {
+			sound-dai = <&q6routing>;
+		};
+		codec {
+			sound-dai = <&wcd9340 1>;
+		};
+	};
+
+	quat-mi2s-dai-link {
+		link-name = "QUAT MI2S Playback";
+		cpu {
+			sound-dai = <&q6afedai QUATERNARY_MI2S_RX>;
+		};
+		platform {
+			sound-dai = <&q6routing>;
+		};
+		codec {
+			sound-dai = <&dummy_codec>;
+		};
+	};
+};
+
+&q6afedai {
+	dai@22 {
+		reg = <QUATERNARY_MI2S_RX>;
+		qcom,sd-lines = <0>;
+	};
+};
+
+&q6asmdai {
+	dai@0 { reg = <MSM_FRONTEND_DAI_MULTIMEDIA1>; };
+	dai@1 { reg = <MSM_FRONTEND_DAI_MULTIMEDIA2>; };
+	dai@2 { reg = <MSM_FRONTEND_DAI_MULTIMEDIA3>; };
+	dai@3 { reg = <MSM_FRONTEND_DAI_MULTIMEDIA4>; };
+};
+
+&wcd9340 {
+	reset-gpios = <&tlmm 143 GPIO_ACTIVE_HIGH>;
+};
+
+/* [crux 2026-10-04] 音量上键：6.17 有、7.3 漏掉的 gpio-keys（PM8150 GPIO6，低有效） */
+&pm8150_gpios {
+	key_vol_up_default: key-vol-up-default-state {
+		pins = "gpio6";
+		function = "normal";
+		input-enable;
+		bias-pull-up;
+		power-source = <1>;
+	};
+};
+
+&{/} {
+	gpio-keys {
+		compatible = "gpio-keys";
+		label = "gpio-keys";
+
+		pinctrl-names = "default";
+		pinctrl-0 = <&key_vol_up_default>;
+
+		vol_up {
+			label = "volume_up";
+			gpios = <&pm8150_gpios 6 GPIO_ACTIVE_LOW>;
+			linux,input-type = <1>;
+			linux,code = <KEY_VOLUMEUP>;
+			gpio-key,wakeup;
+			debounce-interval = <15>;
+			linux,can-disable;
+		};
+	};
+};
+
+/*
+ * [crux 2026-10-04] 触控总控开关。label 对应关系（极容易搞错）：
+ *   qupv3_id_1 = geniqup@ac0000
+ *   qupv3_id_2 = geniqup@cc0000   <-- 触控 i2c17 挂在这个下面
+ *   i2c17      = i2c@c80000       <-- touchscreen@49 在 c80000
+ * 7.3 之前只开了 qupv3_id_1，且 i2c17 的 status 写在未被 include 的
+ * crux-board-mapped.dtsi 里，导致触控 i2c 总线根本没注册。
+ * 放在文件末尾，确保覆盖顺序最后生效。
+ */
+&qupv3_id_2 {
+	status = "okay";
+};
+
+&i2c17 {
+	status = "okay";
+};
+
+/*
+ * [crux 2026-10-04] PMIC GLINK：电池/Type-C 管理走 ADSP 侧服务（qcom_battmgr 需要）
+ * 驱动用写死的 glink channel "PMIC_RTR_ADSP_APPS"，PDR 服务 msm/adsp/charger_pd。
+ * 之前缺失导致 /sys/class/power_supply 为空、没有电池图标。
+ */
+&{/} {
+	pmic-glink {
+		compatible = "qcom,pmic-glink";
+		#address-cells = <1>;
+		#size-cells = <0>;
+	};
+};
+
+/*
+ * [crux 2026-10-06] PMIC RTC: use the nvmem offset scheme (not allow-set-time).
+ *
+ * The PMIC RTC time/control registers are READ-ONLY: writing them is rejected
+ * by the PMIC arbiter ("disallowed SPMI write to sid=0, addr=0x6046" -> EPERM).
+ * That is by design (same on many Qualcomm platforms), so instead of writing
+ * the RTC registers the driver stores an offset from the RTC epoch in
+ * non-volatile memory.
+ *
+ * crux already has such storage: a 4-byte cell in the PMIC SDAM
+ * (crux_sdam_2 / rtc-offset@bc, battery-backed).  Do NOT set allow-set-time,
+ * otherwise the driver takes the failing direct-register-write path.
+ */
+&{/soc@0/spmi@c440000/pmic@0/rtc@6000} {
+	nvmem-cells = <&rtc_offset>;
+	nvmem-cell-names = "offset";
+};

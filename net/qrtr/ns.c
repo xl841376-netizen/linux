@@ -70,6 +70,8 @@ struct qrtr_node {
 	unsigned int id;
 	struct xarray servers;
 	u32 server_count;
+	/* [crux/m2172] whether we already re-announced local servers to this remote node */
+	bool announced;
 };
 
 /* Max nodes, server, lookup limits are chosen based on the current platform
@@ -212,6 +214,29 @@ static void lookup_notify(struct sockaddr_qrtr *to, struct qrtr_server *srv,
 		pr_err("failed to send lookup notification\n");
 }
 
+static int say_hello(struct sockaddr_qrtr *dest)
+{
+	struct qrtr_ctrl_pkt pkt;
+	struct msghdr msg = { };
+	struct kvec iv;
+	int ret;
+
+	iv.iov_base = &pkt;
+	iv.iov_len = sizeof(pkt);
+
+	memset(&pkt, 0, sizeof(pkt));
+	pkt.cmd = cpu_to_le32(QRTR_TYPE_HELLO);
+
+	msg.msg_name = (struct sockaddr *)dest;
+	msg.msg_namelen = sizeof(*dest);
+
+	ret = kernel_sendmsg(qrtr_ns.sock, &msg, &iv, 1, sizeof(pkt));
+	if (ret < 0)
+		pr_err("failed to send hello msg\n");
+
+	return ret;
+}
+
 /* Announce the list of servers registered on the local node */
 static int announce_servers(struct sockaddr_qrtr *sq)
 {
@@ -329,6 +354,12 @@ static int server_del(struct qrtr_node *node, unsigned int port, bool bcast)
 
 static int ctrl_cmd_hello(struct sockaddr_qrtr *sq)
 {
+	int ret;
+
+	ret = say_hello(sq);
+	if (ret < 0)
+		return ret;
+
 	return announce_servers(sq);
 }
 
@@ -491,6 +522,27 @@ static int ctrl_cmd_new_server(struct sockaddr_qrtr *from,
 		if (ret < 0) {
 			pr_err("failed to announce new service\n");
 			return ret;
+		}
+	} else {
+		/*
+		 * [crux/m2172] A remote node registering its first server proves its
+		 * name service is up and able to receive announcements. Local servers
+		 * registered before this node joined (e.g. tqftpserv at boot) otherwise
+		 * only reach it via the racy on-hello announce, which an external
+		 * PCIe/MHI modem may miss - it then cannot resolve the host TFTP server
+		 * it uses to fetch its MCFG. Re-announce once per node.
+		 */
+		struct qrtr_node *rnode = node_get(srv->node);
+
+		if (rnode && !rnode->announced) {
+			struct sockaddr_qrtr sq = {
+				.sq_family = AF_QIPCRTR,
+				.sq_node = srv->node,
+				.sq_port = QRTR_PORT_CTRL,
+			};
+
+			rnode->announced = true;
+			announce_servers(&sq);
 		}
 	}
 
@@ -744,6 +796,10 @@ int qrtr_ns_init(void)
 	qrtr_ns.bcast_sq.sq_family = AF_QIPCRTR;
 	qrtr_ns.bcast_sq.sq_node = QRTR_NODE_BCAST;
 	qrtr_ns.bcast_sq.sq_port = QRTR_PORT_CTRL;
+
+	ret = say_hello(&qrtr_ns.bcast_sq);
+	if (ret < 0)
+		goto err_wq;
 
 	/* As the qrtr ns socket owner and creator is the same module, we have
 	 * to decrease the qrtr module reference count to guarantee that it

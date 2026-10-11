@@ -278,6 +278,8 @@ struct rproc {
 	struct idr notifyids;
 	int index;
 	struct work_struct attach_work;
+	struct delayed_work autoboot_retry_work;
+	int autoboot_retries;
 	struct work_struct crash_handler;
 	spinlock_t crash_handler_lock;
 	bool deleting;

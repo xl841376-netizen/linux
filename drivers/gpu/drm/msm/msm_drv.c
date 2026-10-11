@@ -6,6 +6,8 @@
  */
 
 #include <linux/dma-mapping.h>
+#include <linux/moduleparam.h>
+#include <linux/platform_device.h>
 #include <linux/fault-inject.h>
 #include <linux/debugfs.h>
 #include <linux/of_address.h>
@@ -53,6 +55,51 @@ module_param(dumpstate, bool, 0600);
 static bool modeset = true;
 MODULE_PARM_DESC(modeset, "Use kernel modesetting [KMS] (1=on (default), 0=disable)");
 module_param(modeset, bool, 0600);
+
+/*
+ * [crux] 原生显示延迟接管闸门。
+ * 默认 =1（关着）：msm 不抢显示，开机时固件留下的模拟显示（efifb，CPU 写、
+ * 固件的 DPU 继续扫描）继续跑；想切换时写 0 到
+ * /sys/module/msm/parameters/display_gate，msm 才会绑定并把模拟显示踢掉。
+ */
+static bool display_gate;   /* crux: 默认 0=照常接管；实测固件在切核时并没有留下活着的显示，闸门关着只会黑屏 */
+MODULE_PARM_DESC(display_gate,
+	"crux: defer native display takeover (1=keep firmware framebuffer (default), 0=take over now)");
+
+/*
+ * 直接触发全局 deferred probe 重试。
+ * 注意：driver_deferred_probe_trigger() 在 drivers/base/base.h 里声明、没导出，
+ * 所以这里自己声明一份；只有在 msm 内建（CONFIG_DRM_MSM=y）时才链接得过。
+ */
+extern void driver_deferred_probe_trigger(void);
+
+static void crux_kick_deferred_probe(void)
+{
+	driver_deferred_probe_trigger();
+}
+
+static int display_gate_set(const char *val, const struct kernel_param *kp)
+{
+	int rc = param_set_bool(val, kp);
+
+	if (rc)
+		return rc;
+
+	if (!display_gate) {
+		pr_info("msm: [crux] display gate released, native display takes over\n");
+		crux_kick_deferred_probe();
+	} else {
+		pr_info("msm: [crux] display gate closed, keeping firmware framebuffer\n");
+	}
+
+	return 0;
+}
+
+static const struct kernel_param_ops display_gate_ops = {
+	.set = display_gate_set,
+	.get = param_get_bool,
+};
+module_param_cb(display_gate, &display_gate_ops, &display_gate, 0644);
 
 static bool separate_gpu_kms;
 MODULE_PARM_DESC(separate_gpu_kms, "Use separate DRM device for the GPU (0=single DRM device for both GPU and display (default), 1=two DRM devices)");
@@ -1063,6 +1110,16 @@ int msm_drv_probe(struct device *master_dev,
 	struct msm_drm_private *priv;
 	struct component_match *match = NULL;
 	int ret;
+
+	if (display_gate) {
+		/*
+		 * [crux] 闸门关着：不建 DRM 设备、不碰 DPU/DSI，固件的模拟显示继续跑。
+		 * 写 0 到 /sys/module/msm/parameters/display_gate 才放开。
+		 */
+		dev_info(master_dev,
+			 "crux: display gate closed, keeping firmware framebuffer (write 0 to display_gate to release)\n");
+		return -EPROBE_DEFER;
+	}
 
 	priv = devm_kzalloc(master_dev, sizeof(*priv), GFP_KERNEL);
 	if (!priv)

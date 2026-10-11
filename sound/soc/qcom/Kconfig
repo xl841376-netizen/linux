@@ -253,3 +253,13 @@ config SND_SOC_X1E80100
 	  Say Y or M if you want to use audio device on this SoCs.
 
 endif #SND_SOC_QCOM
+
+config SND_SOC_SM8150
+	tristate "SoC Machine driver for SM8150 boards"
+	depends on QCOM_APR && SOUNDWIRE
+	depends on COMMON_CLK
+	select SND_SOC_QDSP6
+	select SND_SOC_QCOM_COMMON
+	help
+	  To add support for audio on Qualcomm Technologies Inc.
+	  SM8150 SoC-based systems.

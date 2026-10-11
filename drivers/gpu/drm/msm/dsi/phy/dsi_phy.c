@@ -4,6 +4,7 @@
  */
 
 #include <linux/clk-provider.h>
+#include <linux/io.h>
 #include <linux/platform_device.h>
 #include <linux/pm_clock.h>
 #include <linux/pm_runtime.h>
@@ -868,4 +869,20 @@ void msm_dsi_phy_snapshot(struct msm_disp_state *disp_state, struct msm_dsi_phy 
 		msm_disp_snapshot_add_block(disp_state,
 			phy->reg_size, phy->reg_base,
 			"dsi%d_reg", phy->id);
+}
+
+/* [crux] 录制快照：把 PLL 区的最终态读出来，和 DSI 寄存器快照一起出表。
+ * 只读寄存器，不写任何东西。
+ */
+void msm_dsi_phy_crux_dump(struct msm_dsi_phy *phy)
+{
+	u32 off, n;
+
+	if (!phy || !phy->pll_base || !phy->pll_size)
+		return;
+
+	n = min_t(u32, (u32)phy->pll_size, 0x200);
+	for (off = 0; off + 4 <= n; off += 4)
+		pr_info("crux-rec P %d %03x %08x\n", phy->id, off,
+			readl(phy->pll_base + off));
 }

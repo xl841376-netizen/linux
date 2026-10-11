@@ -691,7 +691,8 @@ qcomtee_object_invoke_ctx_invoke(struct qcomtee_object_invoke_ctx *oic,
 	tee_shm_get_pa(oic->out_shm, 0, &out_msg_paddr);
 	tee_shm_get_pa(oic->in_shm, 0, &in_msg_paddr);
 	if (!(oic->flags & QCOMTEE_OIC_FLAG_BUSY))
-		ret = qcom_scm_qtee_invoke_smc(in_msg_paddr, oic->in_msg.size,
+		ret = qcom_scm_qtee_invoke_smc(QCOM_SCM_QTEE_CMD_AUTO,
+					       in_msg_paddr, oic->in_msg.size,
 					       out_msg_paddr, oic->out_msg.size,
 					       &res, res_type);
 	else

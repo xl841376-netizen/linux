@@ -76,6 +76,12 @@ static void qcom_tzmem_cleanup_area(struct qcom_tzmem_area *area)
 
 static bool qcom_tzmem_using_shm_bridge;
 
+bool qcom_tzmem_shm_bridge_available(void)
+{
+	return qcom_tzmem_using_shm_bridge;
+}
+EXPORT_SYMBOL_GPL(qcom_tzmem_shm_bridge_available);
+
 /* List of machines that are known to not support SHM bridge correctly. */
 static const char *const qcom_tzmem_blacklist[] = {
 	"qcom,sc7180", /* hang in rmtfs memory assignment */

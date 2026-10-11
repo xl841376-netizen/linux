@@ -6,6 +6,7 @@
 #include <linux/iopoll.h>
 #include <linux/pm_opp.h>
 #include <linux/reset.h>
+#include <linux/soc/qcom/llcc-qcom.h>
 
 #include "iris_core.h"
 #include "iris_instance.h"
@@ -31,40 +32,71 @@
 #define UC_REGION_ADDR				(CPU_CS_BASE_OFFS + 0x64)
 #define UC_REGION_SIZE				(CPU_CS_BASE_OFFS + 0x68)
 
+#define VPU5_CPU_CS_BASE_OFFS			0x000D2000
+#define VPU5_CPU_IC_BASE_OFFS			0x000DF000
+#define VPU5_WRAPPER_BASE_OFFS			0x000E0000
+
+static bool iris_vpu_uses_legacy_vpu5(struct iris_core *core)
+{
+	return core->iris_platform_data->legacy_vpu5;
+}
+
+static u32 iris_vpu_cpu_cs_base(struct iris_core *core)
+{
+	return iris_vpu_uses_legacy_vpu5(core) ?
+		VPU5_CPU_CS_BASE_OFFS : CPU_CS_BASE_OFFS;
+}
+
+static u32 iris_vpu_wrapper_base(struct iris_core *core)
+{
+	return iris_vpu_uses_legacy_vpu5(core) ?
+		VPU5_WRAPPER_BASE_OFFS : WRAPPER_BASE_OFFS;
+}
+
 static void iris_vpu_interrupt_init(struct iris_core *core)
 {
+	u32 wrapper_base = iris_vpu_wrapper_base(core);
 	u32 mask_val;
 
-	mask_val = readl(core->reg_base + WRAPPER_INTR_MASK);
-	mask_val &= ~(WRAPPER_INTR_MASK_A2HWD_BMSK |
-		      WRAPPER_INTR_MASK_A2HCPU_BMSK);
-	writel(mask_val, core->reg_base + WRAPPER_INTR_MASK);
+	mask_val = readl(core->reg_base + wrapper_base + 0x10);
+	if (iris_vpu_uses_legacy_vpu5(core)) {
+		/* Keep the VPU5 watchdog masked and unmask the normal A2H IRQ. */
+		mask_val |= BIT(4);
+		mask_val &= ~BIT(2);
+	} else {
+		mask_val &= ~(BIT(3) | BIT(2));
+	}
+	writel(mask_val, core->reg_base + wrapper_base + 0x10);
 }
 
 static void iris_vpu_setup_ucregion_memory_map(struct iris_core *core)
 {
-	u32 queue_size, value;
+	u32 cpu_cs_base = iris_vpu_cpu_cs_base(core);
+	u32 region_size, value;
 	const struct vpu_ops *vpu_ops = core->iris_platform_data->vpu_ops;
 
-	/* Iris hardware requires 4K queue alignment */
-	queue_size = ALIGN(sizeof(struct iris_hfi_queue_table_header) +
-		(IFACEQ_QUEUE_SIZE * IFACEQ_NUMQ), SZ_4K);
+	value = (u32)core->iface_q_table_daddr;
+	writel(value, core->reg_base + cpu_cs_base + 0x64);
+
+	/* Iris hardware requires a 1 MiB-aligned advertised UC region. */
+	region_size = iris_hfi_queue_region_size(core);
+	writel(region_size, core->reg_base + cpu_cs_base + 0x68);
 
 	value = (u32)core->iface_q_table_daddr;
-	writel(value, core->reg_base + UC_REGION_ADDR);
+	writel(value, core->reg_base + cpu_cs_base + 0x54);
 
-	/* Iris hardware requires 1M queue alignment */
-	value = ALIGN(SFR_SIZE + queue_size, SZ_1M);
-	writel(value, core->reg_base + UC_REGION_SIZE);
+	writel(QTBL_ENABLE, core->reg_base + cpu_cs_base + 0x50);
 
-	value = (u32)core->iface_q_table_daddr;
-	writel(value, core->reg_base + QTBL_ADDR);
-
-	writel(QTBL_ENABLE, core->reg_base + QTBL_INFO);
+	if (iris_vpu_uses_legacy_vpu5(core)) {
+		/* VPU5 exposes a second queue view for its internal DSP. */
+		writel(value, core->reg_base + cpu_cs_base + 0x34);
+		writel(value, core->reg_base + cpu_cs_base + 0x38);
+		writel(region_size, core->reg_base + cpu_cs_base + 0x3c);
+	}
 
 	if (core->sfr_daddr) {
 		value = (u32)core->sfr_daddr + core->iris_firmware_data->core_arch;
-		writel(value, core->reg_base + SFR_ADDR);
+		writel(value, core->reg_base + cpu_cs_base + 0x5c);
 	}
 
 	if (vpu_ops->program_bootup_registers)
@@ -73,15 +105,17 @@ static void iris_vpu_setup_ucregion_memory_map(struct iris_core *core)
 
 int iris_vpu_boot_firmware(struct iris_core *core)
 {
+	u32 cpu_cs_base = iris_vpu_cpu_cs_base(core);
 	u32 ctrl_init = BIT(0), ctrl_status = 0, count = 0, max_tries = 1000;
 
 	iris_vpu_setup_ucregion_memory_map(core);
 
-	writel(ctrl_init, core->reg_base + CTRL_INIT);
-	writel(0x1, core->reg_base + CPU_CS_SCIACMDARG3);
+	writel(ctrl_init, core->reg_base + cpu_cs_base + 0x48);
+	if (!iris_vpu_uses_legacy_vpu5(core))
+		writel(0x1, core->reg_base + cpu_cs_base + 0x58);
 
 	while (!ctrl_status && count < max_tries) {
-		ctrl_status = readl(core->reg_base + CTRL_STATUS);
+		ctrl_status = readl(core->reg_base + cpu_cs_base + 0x4c);
 		if ((ctrl_status & CTRL_ERROR_STATUS__M) == 0x4) {
 			dev_err(core->dev, "invalid setting for uc_region\n");
 			break;
@@ -96,6 +130,10 @@ int iris_vpu_boot_firmware(struct iris_core *core)
 		return -ETIME;
 	}
 
+	/* The following controls are not present in the VPU5 register window. */
+	if (iris_vpu_uses_legacy_vpu5(core))
+		return 0;
+
 	writel(HOST2XTENSA_INTR_ENABLE, core->reg_base + CPU_CS_H2XSOFTINTEN);
 	writel(0x0, core->reg_base + CPU_CS_X2RPMH);
 
@@ -104,27 +142,37 @@ int iris_vpu_boot_firmware(struct iris_core *core)
 
 void iris_vpu_raise_interrupt(struct iris_core *core)
 {
-	writel(1 << CPU_IC_SOFTINT_H2A_SHFT, core->reg_base + CPU_IC_SOFTINT);
+	if (iris_vpu_uses_legacy_vpu5(core))
+		writel(BIT(15), core->reg_base + VPU5_CPU_IC_BASE_OFFS + 0x18);
+	else
+		writel(BIT(CPU_IC_SOFTINT_H2A_SHFT),
+		       core->reg_base + CPU_IC_SOFTINT);
 }
 
 void iris_vpu_clear_interrupt(struct iris_core *core)
 {
+	u32 cpu_cs_base = iris_vpu_cpu_cs_base(core);
+	u32 wrapper_base = iris_vpu_wrapper_base(core);
 	u32 intr_status, mask;
 
-	intr_status = readl(core->reg_base + WRAPPER_INTR_STATUS);
-	mask = (WRAPPER_INTR_STATUS_A2H_BMSK |
-		WRAPPER_INTR_STATUS_A2HWD_BMSK |
-		CTRL_INIT_IDLE_MSG_BMSK);
+	intr_status = readl(core->reg_base + wrapper_base + 0x0c);
+	mask = BIT(2) | CTRL_INIT_IDLE_MSG_BMSK;
+	mask |= iris_vpu_uses_legacy_vpu5(core) ? BIT(4) : BIT(3);
 
 	if (intr_status & mask)
 		core->intr_status |= intr_status;
 
-	writel(CLEAR_XTENSA2HOST_INTR, core->reg_base + CPU_CS_A2HSOFTINTCLR);
+	writel(CLEAR_XTENSA2HOST_INTR,
+	       core->reg_base + cpu_cs_base + 0x1c);
+	if (iris_vpu_uses_legacy_vpu5(core))
+		writel(intr_status, core->reg_base + wrapper_base + 0x14);
 }
 
 int iris_vpu_watchdog(struct iris_core *core, u32 intr_status)
 {
-	if (intr_status & WRAPPER_INTR_STATUS_A2HWD_BMSK) {
+	u32 watchdog_mask = iris_vpu_uses_legacy_vpu5(core) ? BIT(4) : BIT(3);
+
+	if (intr_status & watchdog_mask) {
 		dev_err(core->dev, "received watchdog interrupt\n");
 		return -ETIME;
 	}
@@ -137,6 +185,10 @@ int iris_vpu_prepare_pc(struct iris_core *core)
 	u32 wfi_status, idle_status, pc_ready;
 	u32 ctrl_status, val = 0;
 	int ret;
+
+	/* The power-collapse sequence below addresses Iris2-only registers. */
+	if (iris_vpu_uses_legacy_vpu5(core))
+		return -EAGAIN;
 
 	ctrl_status = readl(core->reg_base + CTRL_STATUS);
 	pc_ready = ctrl_status & CTRL_STATUS_PC_READY;
@@ -180,6 +232,15 @@ int iris_vpu_power_off_controller(struct iris_core *core)
 	u32 val = 0;
 	int ret;
 
+	if (iris_vpu_uses_legacy_vpu5(core)) {
+		iris_disable_unprepare_clock(core, IRIS_AHB_CLK);
+		iris_disable_unprepare_clock(core, IRIS_CTRL_CLK);
+		iris_disable_unprepare_clock(core, IRIS_AXI_CLK);
+		iris_disable_power_domains(core,
+			core->pmdomain_tbl->pd_devs[IRIS_CTRL_POWER_DOMAIN]);
+		return 0;
+	}
+
 	writel(MSK_SIGNAL_FROM_TENSILICA | MSK_CORE_POWER_ON, core->reg_base + CPU_CS_X2RPMH);
 
 	if (!core->iris_platform_data->no_aon) {
@@ -222,6 +283,18 @@ disable_power:
 
 void iris_vpu_power_off_hw(struct iris_core *core)
 {
+	if (iris_vpu_uses_legacy_vpu5(core)) {
+		iris_disable_unprepare_clock(core, IRIS_BSE_HW_CLK);
+		iris_disable_unprepare_clock(core, IRIS_VPP0_HW_CLK);
+		iris_disable_unprepare_clock(core, IRIS_HW_AHB_CLK);
+		iris_disable_unprepare_clock(core, IRIS_HW_CLK);
+		iris_disable_power_domains(core,
+			core->pmdomain_tbl->pd_devs[IRIS_VPP0_HW_POWER_DOMAIN]);
+		iris_disable_power_domains(core,
+			core->pmdomain_tbl->pd_devs[IRIS_HW_POWER_DOMAIN]);
+		return;
+	}
+
 	dev_pm_genpd_set_hwmode(core->pmdomain_tbl->pd_devs[IRIS_HW_POWER_DOMAIN], false);
 	iris_disable_power_domains(core, core->pmdomain_tbl->pd_devs[IRIS_HW_POWER_DOMAIN]);
 	iris_disable_unprepare_clock(core, IRIS_BSE_HW_CLK);
@@ -231,6 +304,18 @@ void iris_vpu_power_off_hw(struct iris_core *core)
 
 void iris_vpu_power_off(struct iris_core *core)
 {
+	int i;
+
+	if (core->llcc_active) {
+		for (i = ARRAY_SIZE(core->llcc_slices) - 1; i >= 0; i--) {
+			llcc_slice_deactivate(core->llcc_slices[i]);
+			llcc_slice_putd(core->llcc_slices[i]);
+			core->llcc_slices[i] = NULL;
+		}
+		core->llcc_active = false;
+		core->syscache_set = false;
+	}
+
 	iris_opp_set_rate(core->dev, 0);
 	core->iris_platform_data->vpu_ops->power_off_hw(core);
 	core->iris_platform_data->vpu_ops->power_off_controller(core);
@@ -285,9 +370,16 @@ int iris_vpu_power_on_hw(struct iris_core *core)
 	if (ret)
 		return ret;
 
+	if (iris_vpu_uses_legacy_vpu5(core)) {
+		ret = iris_enable_power_domains(core,
+			core->pmdomain_tbl->pd_devs[IRIS_VPP0_HW_POWER_DOMAIN]);
+		if (ret)
+			goto err_disable_power;
+	}
+
 	ret = iris_prepare_enable_clock(core, IRIS_HW_CLK);
 	if (ret)
-		goto err_disable_power;
+		goto err_disable_aux_power;
 
 	ret = iris_prepare_enable_clock(core, IRIS_HW_AHB_CLK);
 	if (ret && ret != -ENOENT)
@@ -297,12 +389,24 @@ int iris_vpu_power_on_hw(struct iris_core *core)
 	if (ret && ret != -ENOENT)
 		goto err_disable_hw_ahb_clock;
 
+	if (iris_vpu_uses_legacy_vpu5(core)) {
+		ret = iris_prepare_enable_clock(core, IRIS_VPP0_HW_CLK);
+		if (ret)
+			goto err_disable_bse_clock;
+	}
+
 	return 0;
 
+err_disable_bse_clock:
+	iris_disable_unprepare_clock(core, IRIS_BSE_HW_CLK);
 err_disable_hw_ahb_clock:
 	iris_disable_unprepare_clock(core, IRIS_HW_AHB_CLK);
 err_disable_hw_clock:
 	iris_disable_unprepare_clock(core, IRIS_HW_CLK);
+err_disable_aux_power:
+	if (iris_vpu_uses_legacy_vpu5(core))
+		iris_disable_power_domains(core,
+			core->pmdomain_tbl->pd_devs[IRIS_VPP0_HW_POWER_DOMAIN]);
 err_disable_power:
 	iris_disable_power_domains(core, core->pmdomain_tbl->pd_devs[IRIS_HW_POWER_DOMAIN]);
 
@@ -311,6 +415,9 @@ err_disable_power:
 
 int iris_vpu_set_hwmode(struct iris_core *core)
 {
+	if (iris_vpu_uses_legacy_vpu5(core))
+		return 0;
+
 	return dev_pm_genpd_set_hwmode(core->pmdomain_tbl->pd_devs[IRIS_HW_POWER_DOMAIN], true);
 }
 
@@ -481,7 +588,9 @@ int iris_vpu_power_on(struct iris_core *core)
 	freq = core->power.clk_freq ? core->power.clk_freq :
 				      (u32)ULONG_MAX;
 
-	iris_opp_set_rate(core->dev, freq);
+	ret = iris_opp_set_rate(core->dev, freq);
+	if (ret)
+		goto err_power_off_hw;
 
 	iris_vpu_set_preset_registers(core);
 
@@ -491,6 +600,8 @@ int iris_vpu_power_on(struct iris_core *core)
 
 	return 0;
 
+err_power_off_hw:
+	core->iris_platform_data->vpu_ops->power_off_hw(core);
 err_power_off_ctrl:
 	core->iris_platform_data->vpu_ops->power_off_controller(core);
 err_unvote_icc:
@@ -503,5 +614,10 @@ err:
 
 void iris_vpu_set_preset_registers(struct iris_core *core)
 {
-	writel(0x0, core->reg_base + 0xb0088);
+	if (iris_vpu_uses_legacy_vpu5(core)) {
+		writel(0, core->reg_base + 0xe2010);
+		writel(0, core->reg_base + 0xe2000);
+	} else {
+		writel(0, core->reg_base + 0xb0088);
+	}
 }

@@ -16,6 +16,8 @@
 #include "iris_resources.h"
 #include "iris_state.h"
 
+struct llcc_slice_desc;
+
 struct icc_info {
 	const char		*name;
 	u32			bw_min_kbps;
@@ -115,6 +117,9 @@ struct iris_core {
 	u32					header_id;
 	u32					packet_id;
 	struct iris_core_power			power;
+	struct llcc_slice_desc			*llcc_slices[2];
+	bool					llcc_active;
+	bool					syscache_set;
 	const struct iris_hfi_sys_ops		*hfi_sys_ops;
 	struct completion			core_init_done;
 	u32					intr_status;
@@ -127,5 +132,6 @@ struct iris_core {
 
 int iris_core_init(struct iris_core *core);
 void iris_core_deinit(struct iris_core *core);
+int iris_core_deinit_for_system_suspend(struct iris_core *core);
 
 #endif

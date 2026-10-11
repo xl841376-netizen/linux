@@ -371,6 +371,74 @@ static const struct mhi_controller_config modem_qcom_v1_mhiv_config = {
 	.event_cfg = modem_qcom_v1_mhi_events,
 };
 
+/*
+ * [crux] 外挂 SDX50M（X50）专属通道/事件表。
+ * 数值取自原厂下游树 arch/arm64/boot/dts/qcom/sm8150-mhi.dtsi
+ * （mhi_chan@N：label / num-elements / event-ring / chan-dir / ee）：
+ *   2/3   SAHARA  128  ER1  **ee=0x2 即 SBL**   <- SBL 灌固件就靠它
+ *   25    BL      64   ER2  **ee=0x2 即 SBL**
+ *   4/5   DIAG    64   ER1/ER3
+ *   10/11 EFS     64   ER1
+ *   14/15 QMI0    64   ER1/ER2
+ *   16/17 QMI1    64   ER3
+ *   18/19 IP_CTRL 64   ER1
+ *   20/21 IPCR    64   ER2
+ *   32/33 DUN     64   ER3
+ *   34/35 FIREHOSE(FP EE)
+ *   100/101 IP_HW0 512 ER5/ER6
+ * 事件环（原厂 ER0-ER6）：0 CTRL32、1 DATA256、2 DATA256、3 DATA256、
+ *   4 SW_DATA64、5 HW_DATA(1024,ch100)、6 HW_DATA(2048,ch101)。
+ * 控制器参数也照原厂：max-channels 111、timeout 2000ms、buffer-len 0x8000、
+ *   bounce buffer。
+ */
+static const struct mhi_channel_config mhi_qcom_sdx50m_channels[] = {
+	MHI_CHANNEL_CONFIG_UL_SBL(2, "SAHARA", 128, 1),
+	MHI_CHANNEL_CONFIG_DL_SBL(3, "SAHARA", 128, 1),
+	MHI_CHANNEL_CONFIG_DL_SBL(25, "BL", 64, 2),
+	MHI_CHANNEL_CONFIG_UL(4, "DIAG", 64, 1),
+	MHI_CHANNEL_CONFIG_DL(5, "DIAG", 64, 3),
+	MHI_CHANNEL_CONFIG_UL(10, "EFS", 64, 1),
+	MHI_CHANNEL_CONFIG_DL(11, "EFS", 64, 1),
+	MHI_CHANNEL_CONFIG_UL(14, "QMI", 64, 1),
+	MHI_CHANNEL_CONFIG_DL(15, "QMI", 64, 2),
+	MHI_CHANNEL_CONFIG_UL(16, "QMI1", 64, 3),
+	MHI_CHANNEL_CONFIG_DL(17, "QMI1", 64, 3),
+	MHI_CHANNEL_CONFIG_UL(18, "IP_CTRL", 64, 1),
+	MHI_CHANNEL_CONFIG_DL(19, "IP_CTRL", 64, 1),
+	MHI_CHANNEL_CONFIG_UL(20, "IPCR", 64, 2),
+	MHI_CHANNEL_CONFIG_DL(21, "IPCR", 64, 2),
+	MHI_CHANNEL_CONFIG_UL(32, "DUN", 64, 3),
+	MHI_CHANNEL_CONFIG_DL(33, "DUN", 64, 3),
+	MHI_CHANNEL_CONFIG_UL_FP(34, "FIREHOSE", 32, 1),
+	MHI_CHANNEL_CONFIG_DL_FP(35, "FIREHOSE", 32, 1),
+	MHI_CHANNEL_CONFIG_UL(46, "IP_SW0", 64, 2),
+	MHI_CHANNEL_CONFIG_DL(47, "IP_SW0", 64, 3),
+	MHI_CHANNEL_CONFIG_HW_UL(100, "IP_HW0", 512, 5),
+	MHI_CHANNEL_CONFIG_HW_DL(101, "IP_HW0", 512, 6),
+};
+
+static struct mhi_event_config mhi_qcom_sdx50m_events[] = {
+	MHI_EVENT_CONFIG_CTRL(0, 32),
+	MHI_EVENT_CONFIG_DATA(1, 256),
+	MHI_EVENT_CONFIG_DATA(2, 256),
+	MHI_EVENT_CONFIG_DATA(3, 256),
+	MHI_EVENT_CONFIG_SW_DATA(4, 64),
+	MHI_EVENT_CONFIG_HW_DATA(5, 1024, 100),
+	MHI_EVENT_CONFIG_HW_DATA(6, 2048, 101),
+};
+
+static const struct mhi_controller_config modem_qcom_sdx50m_mhiv_config = {
+	.max_channels = 111,
+	.timeout_ms = 2000,
+	.ready_timeout_ms = 50000,
+	.buf_len = 0x8000,
+	.use_bounce_buf = true,
+	.num_channels = ARRAY_SIZE(mhi_qcom_sdx50m_channels),
+	.ch_cfg = mhi_qcom_sdx50m_channels,
+	.num_events = ARRAY_SIZE(mhi_qcom_sdx50m_events),
+	.event_cfg = mhi_qcom_sdx50m_events,
+};
+
 static const struct mhi_pci_dev_info mhi_qcom_sa8775p_info = {
 	.name = "qcom-sa8775p",
 	.edl_trigger = false,
@@ -423,6 +491,19 @@ static const struct mhi_pci_dev_info mhi_qcom_sdx35_info = {
 	.mru_default = 32768,
 	.sideband_wake = false,
 	.edl_trigger = true,
+};
+
+/* [crux] 外挂 SDX50M（X50），PCI ID 17cb:0305 */
+static const struct mhi_pci_dev_info mhi_qcom_sdx50m_info = {
+	.name = "qcom-sdx50m",
+	.fw = "qcom/sdx50m/sbl1.mbn",
+	.edl = "qcom/sdx50m/edl.mbn",
+	.edl_trigger = true,
+	.config = &modem_qcom_sdx50m_mhiv_config,
+	.bar_num = MHI_PCI_DEFAULT_BAR_NUM,
+	.dma_data_width = 32,
+	.mru_default = 32768,
+	.sideband_wake = false,
 };
 
 static const struct mhi_pci_dev_info mhi_qcom_sdx24_info = {
@@ -965,6 +1046,8 @@ static const struct pci_device_id mhi_pci_id_table[] = {
 		.driver_data = (kernel_ulong_t) &mhi_qcom_sdx35_info },
 	{ PCI_DEVICE(PCI_VENDOR_ID_QCOM, 0x0304),
 		.driver_data = (kernel_ulong_t) &mhi_qcom_sdx24_info },
+	{ PCI_DEVICE(PCI_VENDOR_ID_QCOM, 0x0305),
+		.driver_data = (kernel_ulong_t) &mhi_qcom_sdx50m_info },
 	{ PCI_DEVICE_SUB(PCI_VENDOR_ID_QCOM, 0x0306, PCI_VENDOR_ID_QCOM, 0x010c),
 		.driver_data = (kernel_ulong_t) &mhi_foxconn_sdx55_info },
 	/* EM919x (sdx55), use the same vid:pid as qcom-sdx55m */

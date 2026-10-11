@@ -139,4 +139,7 @@ int msm_dsi_dphy_timing_calc_v4(struct msm_dsi_dphy_timing *timing,
 int msm_dsi_cphy_timing_calc_v4(struct msm_dsi_dphy_timing *timing,
 				struct msm_dsi_phy_clk_request *clk_req);
 
+/* [crux] 录制快照：把 PHY/PLL 区整块读回来（只读，不写寄存器） */
+void msm_dsi_phy_crux_dump(struct msm_dsi_phy *phy);
+
 #endif /* __DSI_PHY_H__ */

@@ -254,34 +254,14 @@ static int rpmh_regulator_vrm_set_voltage_sel(struct regulator_dev *rdev,
 					selector > vreg->voltage_selector);
 }
 
-static int _rpmh_regulator_vrm_get_voltage(struct regulator_dev *rdev, int *uV)
-{
-	struct rpmh_vreg *vreg = rdev_get_drvdata(rdev);
-	struct tcs_cmd cmd = {
-		.addr = vreg->addr + RPMH_REGULATOR_REG_VRM_VOLTAGE,
-	};
-	int ret;
-
-	ret = rpmh_read(vreg->dev, &cmd);
-	if (!ret)
-		*uV = (cmd.data & RPMH_REGULATOR_VOLTAGE_MASK) * 1000;
-	else
-		dev_err(vreg->dev, "failed to read VOLTAGE ret = %d\n", ret);
-
-	return ret;
-}
-
+/*
+ * [crux 2026-10-01] 照原厂做法：不读硬件。
+ * 原厂 4.14 的 rpmh-regulator 里 get_voltage 就是回自己的账本（set 过什么就报什么），
+ * 我们照抄，避免为"读真值"给本来就不应答读请求的 RSC 发命令。
+ */
 static int rpmh_regulator_vrm_get_voltage_sel(struct regulator_dev *rdev)
 {
 	struct rpmh_vreg *vreg = rdev_get_drvdata(rdev);
-	int ret, uV = 0;
-
-	if (vreg->voltage_selector < 0) {
-		ret = _rpmh_regulator_vrm_get_voltage(rdev, &uV);
-		if (!ret && uV != 0)
-			vreg->voltage_selector = regulator_map_voltage_linear_range(rdev,
-							uV, INT_MAX);
-	}
 
 	return vreg->voltage_selector;
 }
@@ -367,21 +347,6 @@ static int rpmh_regulator_vrm_set_mode(struct regulator_dev *rdev,
 	return ret;
 }
 
-static int rpmh_regulator_vrm_get_pmic_mode(struct rpmh_vreg *vreg, int *pmic_mode)
-{
-	struct tcs_cmd cmd = {
-		.addr = vreg->addr + RPMH_REGULATOR_REG_VRM_MODE,
-	};
-	int ret;
-
-	ret = rpmh_read(vreg->dev, &cmd);
-	if (!ret)
-		*pmic_mode = cmd.data & RPMH_REGULATOR_MODE_MASK;
-	else
-		return -EINVAL;
-
-	return 0;
-}
 
 static unsigned int rpmh_regulator_vrm_get_mode(struct regulator_dev *rdev)
 {
@@ -587,70 +552,12 @@ static int rpmh_regulator_init_vreg(struct rpmh_vreg *vreg, struct device *dev,
 	return 0;
 }
 
+/*
+ * [crux 2026-10-01] 原厂（4.14）没有这段逻辑，我们也不读 ENABLE。
+ * 初始模式交给 DT（regulator-initial-mode / boot-on / always-on）与驱动账本。
+ */
 static int rpmh_regulator_determine_initial_mode(struct rpmh_vreg *vreg)
 {
-	struct tcs_cmd cmd = {
-		.addr = vreg->addr + RPMH_REGULATOR_REG_ENABLE,
-	};
-	int ret, pmic_mode, mode;
-	int sts;
-
-	ret = rpmh_read(vreg->dev, &cmd);
-	if (ret) {
-		dev_err(vreg->dev, "failed to read ENABLE status ret = %d\n", ret);
-
-		return ret;
-	}
-
-	sts = cmd.data & RPMH_REGULATOR_ENABLE_MASK;
-	if (!sts)
-		return 0;
-
-	if (vreg->hw_data->regulator_type == XOB)
-		return 0;
-
-	ret = rpmh_regulator_vrm_get_pmic_mode(vreg, &pmic_mode);
-	if (ret < 0) {
-		vreg->mode = REGULATOR_MODE_INVALID;
-		dev_err(vreg->dev, "failed to read pmic_mode ret = %d\n", ret);
-
-		return ret;
-	}
-
-	/*
-	 * NOTE: Since BOB4 BYPASS_MODE value = 0 we cannot confirm if that BOB
-	 * regulator has been sent into bypass mode by bootloader or if bootloader
-	 * just has not requested for any mode voting. Due this limitation, we
-	 * must check if the read pmic_mode value is non-zero before comparing it
-	 * to bypass mode value. This also is needed to avoid setting BYPASS status
-	 * for LDOs which dont support bypass mode, and have the pmic_bypass_mode
-	 * uninitialized value as zero in the vreg hw data. For such cases assume
-	 * lowest mode, if pmic_mode is zero, to allow for mode voting.
-	 */
-	if (!pmic_mode) {
-		for (mode = REGULATOR_MODE_STANDBY; mode > REGULATOR_MODE_INVALID; mode >>= 1) {
-			if (vreg->hw_data->pmic_mode_map[mode] >= 0) {
-				vreg->mode = mode;
-				break;
-			}
-		}
-
-		return 0;
-	}
-
-	if (vreg->hw_data->pmic_bypass_mode == pmic_mode) {
-		vreg->bypassed = true;
-
-		return 0;
-	}
-
-	for (mode = REGULATOR_MODE_STANDBY; mode > REGULATOR_MODE_INVALID; mode >>= 1) {
-		if (pmic_mode == vreg->hw_data->pmic_mode_map[mode]) {
-			vreg->mode = mode;
-			break;
-		}
-	}
-
 	return 0;
 }
 

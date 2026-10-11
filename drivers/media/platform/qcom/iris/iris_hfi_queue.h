@@ -13,6 +13,7 @@ struct iris_core;
  * can be queued by v4l2 framework at any given time.
  */
 #define IFACEQ_MAX_BUF_COUNT		64
+#define IFACEQ_LEGACY_MAX_BUF_COUNT	50
 /*
  * Max session supported are 16.
  * this value is used to calcualte the size of
@@ -165,10 +166,25 @@ struct iris_hfi_queue_table_header {
 	struct iris_hfi_queue_header q_hdr[IFACEQ_NUMQ];
 };
 
+/*
+ * VIDEO.IR.1.2 predates the extended Iris queue-table header.  Its first
+ * queue header starts immediately after the six common u32 fields.
+ */
+struct iris_hfi_legacy_queue_table_header {
+	u32 version;
+	u32 size;
+	u32 qhdr0_offset;
+	u32 qhdr_size;
+	u32 num_q;
+	u32 num_active_q;
+	struct iris_hfi_queue_header q_hdr[IFACEQ_NUMQ];
+};
+
 struct iris_iface_q_info {
 	struct iris_hfi_queue_header *qhdr;
 	dma_addr_t	device_addr;
 	void		*kernel_vaddr;
+	u32		size;
 };
 
 int iris_hfi_queues_init(struct iris_core *core);
@@ -178,5 +194,6 @@ int iris_hfi_queue_cmd_write_locked(struct iris_core *core, void *pkt, u32 pkt_s
 int iris_hfi_queue_cmd_write(struct iris_core *core, void *pkt, u32 pkt_size);
 int iris_hfi_queue_msg_read(struct iris_core *core, void *pkt);
 int iris_hfi_queue_dbg_read(struct iris_core *core, void *pkt);
+u32 iris_hfi_queue_region_size(struct iris_core *core);
 
 #endif

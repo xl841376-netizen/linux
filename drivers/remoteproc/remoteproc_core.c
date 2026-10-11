@@ -1666,11 +1666,49 @@ disable_iommu:
  * to unregister the device. one other option is just to use kref here,
  * that might be cleaner).
  */
+#define RPROC_AUTOBOOT_RETRY_MS 2000
+#define RPROC_AUTOBOOT_RETRY_MAX 20
+
+static void rproc_autoboot_retry_work(struct work_struct *work)
+{
+	struct rproc *rproc = container_of(work, struct rproc,
+					   autoboot_retry_work.work);
+	int ret;
+
+	if (rproc->deleting || rproc->state != RPROC_OFFLINE)
+		return;
+
+	if (rproc->autoboot_retries >= RPROC_AUTOBOOT_RETRY_MAX) {
+		dev_err(&rproc->dev, "autoboot: giving up after %d retries",
+			rproc->autoboot_retries);
+		return;
+	}
+	rproc->autoboot_retries++;
+
+	ret = rproc_boot(rproc);
+	if (ret) {
+		dev_info(&rproc->dev, "autoboot retry %d failed (%d), next in %d ms",
+			 rproc->autoboot_retries, ret, RPROC_AUTOBOOT_RETRY_MS);
+		schedule_delayed_work(&rproc->autoboot_retry_work,
+				      msecs_to_jiffies(RPROC_AUTOBOOT_RETRY_MS));
+	} else {
+		dev_info(&rproc->dev, "autoboot retry %d succeeded",
+			 rproc->autoboot_retries);
+	}
+}
+
 static void rproc_auto_boot_callback(const struct firmware *fw, void *context)
 {
 	struct rproc *rproc = context;
+	int ret;
 
-	rproc_boot(rproc);
+	ret = rproc_boot(rproc);
+	if (ret && !rproc->deleting) {
+		dev_info(&rproc->dev, "autoboot failed (%d), retrying every %d ms",
+			 ret, RPROC_AUTOBOOT_RETRY_MS);
+		schedule_delayed_work(&rproc->autoboot_retry_work,
+				      msecs_to_jiffies(RPROC_AUTOBOOT_RETRY_MS));
+	}
 
 	release_firmware(fw);
 }
@@ -2550,6 +2588,7 @@ struct rproc *rproc_alloc(struct device *dev, const char *name,
 	INIT_LIST_HEAD(&rproc->dump_segments);
 
 	INIT_WORK(&rproc->attach_work, rproc_attach_work);
+	INIT_DELAYED_WORK(&rproc->autoboot_retry_work, rproc_autoboot_retry_work);
 	INIT_WORK(&rproc->crash_handler, rproc_crash_handler_work);
 	spin_lock_init(&rproc->crash_handler_lock);
 
@@ -2574,6 +2613,7 @@ EXPORT_SYMBOL(rproc_alloc);
  */
 void rproc_free(struct rproc *rproc)
 {
+	cancel_delayed_work_sync(&rproc->autoboot_retry_work);
 	put_device(&rproc->dev);
 }
 EXPORT_SYMBOL(rproc_free);
