@@ -13,7 +13,7 @@
 | 机型 | `Xiaomi Mi 9 Pro 5G (crux)`（/sys/firmware/devicetree/base/model） |
 | 内核 | `7.3.0-rc5-00037-g551c722f4080-dirty #103 SMP PREEMPT`（2026-10-09 构建） |
 | 根文件系统 | `Ubuntu 26.04.1 LTS`（aarch64，KDE 桌面） |
-| 引导 | UEFI + ESP：`BOOT_IMAGE=(hd5,gpt35)/EFI/crux/Image73`（SimpleInit）；内核 cmdline 含 `clk_ignore_unused pd_ignore_unused deferred_probe_timeout=-1` |
+| 引导 | UEFI + ESP（`/dev/sda35`，label `efi`）+ **GRUB**：`EFI/BOOT/BOOTAA64.efi`，菜单配置 `EFI/crux/grub.cfg`。默认条目 `crux Linux (mainline 7.3 native)` 先跑 `cruxdisplay.mod` 的 `crux_display_init` 把显示电路按内核那套交接好，再 `linux/initrd/devicetree` 交给内核（`BOOT_IMAGE=(hd5,gpt35)/EFI/crux/Image73`）；另有 6.17 回退条目与 Windows(WoA) 链式引导条目 |
 | 根分区 | `root=UUID=ed36cd26-…` = `/dev/sda37`（`linux-root26`，24G） |
 | 稳定性 | 本次开机 **1 小时 25 分未重启**，load average 0.09（四颗 DSP + WiFi 常驻下） |
 
