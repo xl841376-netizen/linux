@@ -1851,6 +1851,13 @@
 
 	bluetooth {
 		compatible = "qcom,wcn3990-bt";
+		/*
+		 * [crux 2026-10-12] 出厂 BD 地址（打印出来是 39:90:21:74:07:00）。
+		 * 芯片与 NV(/lib/firmware/qca/crnv01.bin 偏移 0x14 = 00 07 74 21 90 39)
+		 * 报的是同一个地址，qca_check_bdaddr() 因此置 HCI_QUIRK_USE_BDADDR_PROPERTY，
+		 * 内核要求从 DT 取地址；不写就一直 unconfigured（mgmt 里看不到、hciconfig up 报 95）。
+		 */
+		local-bd-address = [00 07 74 21 90 39];
 
 		vddio-supply = <&vreg_l7a_1p8>;
 		vddxo-supply = <&vreg_l7a_1p8>;
