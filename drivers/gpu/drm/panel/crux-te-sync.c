@@ -17,6 +17,7 @@
 #include <linux/workqueue.h>
 #include <linux/delay.h>
 #include <linux/ktime.h>
+#include <linux/jiffies.h>
 
 #define CRUX_INTF1_PHYS  0xae6b800UL
 #define CRUX_INTF1_SIZE  0x300
@@ -76,9 +77,25 @@ struct crux_te {
     int nprev;
     struct dentry *dbg;
     struct delayed_work work;
+    unsigned long last_warn;   /* [crux2026-10-11] 异常上报节流用 */
 };
 
 static struct crux_te *g_te;
+
+/*
+ * [crux 2026-10-11] 日志分流：默认只在“明确异常”时打印。
+ * 原来每 2 秒无条件打 1 行 + 变化时再打满 17 行（frame/line/tear_* 这些
+ * 单调计数器每轮都在变）=> 约 9 行/秒、每天 78 万行、journal 涨到 1.6G。
+ * 现在：
+ *   ① 首次采样只建立基线，不打日志；
+ *   ② 单调计数器（frame_cnt/line_cnt/tear_*_cnt/out_line）的变化不算异常；
+ *   ③ 只有“稳定寄存器偏离基线”才算异常 -> pr_warn，且最多 60s 报一次；
+ *   ④ 需要全量时：echo 1 > /sys/module/crux_te_sync/parameters/verbose
+ *      （或随时读 /sys/kernel/debug/crux_te_sync/stats，不受影响）。
+ */
+static bool crux_verbose;
+module_param_named(verbose, crux_verbose, bool, 0644);
+MODULE_PARM_DESC(verbose, "每轮打印全部 INTF/DSI 寄存器（默认 0：只在异常时打印）");
 
 static u32 rd(void __iomem *b, u32 off)
 {
@@ -89,44 +106,65 @@ static void crux_dump(struct crux_te *t)
 {
     const char *nm[CRUX_MAX_REG];
     u32 v[CRUX_MAX_REG];
+    bool mono[CRUX_MAX_REG];
     int i, n = 0, changed = 0;
 
-#define ADD(base, name, off) do { nm[n] = name; v[n] = rd(base, off); n++; } while (0)
+#define ADD(base, name, off)  do { nm[n] = name; v[n] = rd(base, off); mono[n] = false; n++; } while (0)
+#define ADDM(base, name, off) do { nm[n] = name; v[n] = rd(base, off); mono[n] = true;  n++; } while (0)
     ADD(t->intf, "intf_timing_en", I_TIMING_EN);
     ADD(t->intf, "intf_cfg", I_CONFIG);
     ADD(t->intf, "intf_cfg2", I_CONFIG2);
     ADD(t->intf, "intf_panel_fmt", I_PANEL_FORMAT);
     ADD(t->intf, "intf_polarity", I_POLARITY);
-    ADD(t->intf, "intf_frame_cnt", I_FRAME_COUNT);
-    ADD(t->intf, "intf_line_cnt", I_LINE_COUNT);
+    ADDM(t->intf, "intf_frame_cnt", I_FRAME_COUNT);
+    ADDM(t->intf, "intf_line_cnt", I_LINE_COUNT);
     ADD(t->intf, "tear_vsync_sel", I_TEAR_VSYNC_SEL);
     ADD(t->intf, "tear_check_en", I_TEAR_CHECK_EN);
     ADD(t->intf, "tear_sync_cfg", I_TEAR_SYNC_CFG);
-    ADD(t->intf, "tear_int_cnt", I_TEAR_INT_COUNT);
-    ADD(t->intf, "tear_line_cnt", I_TEAR_LINE_COUNT);
-    ADD(t->intf, "tear_out_line", I_TEAR_OUT_LINE);
+    ADDM(t->intf, "tear_int_cnt", I_TEAR_INT_COUNT);
+    ADDM(t->intf, "tear_line_cnt", I_TEAR_LINE_COUNT);
+    ADDM(t->intf, "tear_out_line", I_TEAR_OUT_LINE);
     ADD(t->intf, "tear_autoref", I_TEAR_AUTOREFRESH);
     ADD(t->dsi, "dsi_ctrl", D_CTRL);
     ADD(t->dsi, "dsi_cmd_cfg0", D_CMD_CFG0);
     ADD(t->dsi, "dsi_cmd_cfg1", D_CMD_CFG1);
 #undef ADD
+#undef ADDM
 
-    pr_info("[crux-te] dsi: dma_ctrl=%08x trig=%08x lane=%08x lane_swap=%08x err_mask0=%08x mdp_ctrl2=%08x\n",
-            rd(t->dsi, D_CMD_DMA_CTRL), rd(t->dsi, D_TRIG_CTRL),
-            rd(t->dsi, D_LANE_CTRL), rd(t->dsi, D_LANE_SWAP),
-            rd(t->dsi, D_ERR_INT_MASK0), rd(t->dsi, D_CMD_MDP_CTRL2));
+    /* 首次采样：只建立基线，不打日志 */
+    if (t->nprev == 0) {
+        for (i = 0; i < n; i++)
+            t->prev[i] = v[i];
+        t->nprev = n;
+        return;
+    }
 
-    for (i = 0; i < n && i < t->nprev; i++)
-        if (v[i] != t->prev[i])
-            changed = 1;
-
-    if (changed || t->nprev == 0)
+    /* 调试模式：恢复原来的全量 dump */
+    if (crux_verbose) {
+        pr_info("[crux-te] dsi: dma_ctrl=%08x trig=%08x lane=%08x lane_swap=%08x err_mask0=%08x mdp_ctrl2=%08x\n",
+                rd(t->dsi, D_CMD_DMA_CTRL), rd(t->dsi, D_TRIG_CTRL),
+                rd(t->dsi, D_LANE_CTRL), rd(t->dsi, D_LANE_SWAP),
+                rd(t->dsi, D_ERR_INT_MASK0), rd(t->dsi, D_CMD_MDP_CTRL2));
         for (i = 0; i < n; i++)
             pr_info("[crux-te] %s=%08x\n", nm[i], v[i]);
+        return;
+    }
 
-    for (i = 0; i < n && i < CRUX_MAX_REG; i++)
-        t->prev[i] = v[i];
-    t->nprev = n;
+    /* 默认路径：只有“稳定寄存器偏离基线”才算明确异常 */
+    for (i = 0; i < n; i++)
+        if (!mono[i] && v[i] != t->prev[i])
+            changed++;
+
+    if (changed && time_after(jiffies, t->last_warn + 60 * HZ)) {
+        t->last_warn = jiffies;
+        pr_warn("[crux-te] 异常：%d 个稳定寄存器偏离基线\n", changed);
+        for (i = 0; i < n; i++) {
+            if (mono[i] || v[i] == t->prev[i])
+                continue;
+            pr_warn("[crux-te] %s: 基线 %08x -> 现在 %08x\n",
+                    nm[i], t->prev[i], v[i]);
+        }
+    }
 }
 
 static ssize_t stats_read(struct file *f, char __user *u, size_t n, loff_t *o)
