@@ -374,6 +374,8 @@ static int crux_force_cut_notify(struct notifier_block *nb, unsigned long action
 {
 	if (action == SYS_POWER_OFF)
 		crux_force_cut_arm(CRUX_FORCE_CUT_KERNEL_MS, true);
+	else if (action == SYS_RESTART)
+		crux_force_cut_arm(CRUX_FORCE_CUT_KERNEL_MS, false);
 
 	return NOTIFY_DONE;
 }
@@ -657,6 +659,16 @@ static void crux_print_tail(void)
 		 crux_report_buf + crux_snap_len);
 }
 
+/*
+ * [crux 2026-10-11] 内核侧兜底原因：用户态没写（最小 rootfs 里没有写入者）时，
+ * 也要知道这次关机是谁发起的，写进 IMEM / report。
+ */
+static void crux_reason_default(const char *def)
+{
+	if (!strcmp(crux_reason, "normal"))
+		strscpy(crux_reason, def, sizeof(crux_reason));
+}
+
 /* 不能睡眠的阶段：跑各驱动的收尾步骤，最后一下硬断电 */
 static int crux_poweroff(struct sys_off_data *data)
 {
@@ -665,7 +677,8 @@ static int crux_poweroff(struct sys_off_data *data)
 
 	crux_cut_started = true;
 	strscpy(crux_stage, "poweroff", sizeof(crux_stage));
-	crux_shutdown_report("agent", "POWEROFF begin");
+	crux_reason_default("kernel-poweroff");
+	crux_shutdown_report("agent", "POWEROFF begin, reason=%s", crux_reason);
 	crux_run_steps(CRUX_SHUTDOWN_POWEROFF);
 	crux_print_tail();
 
@@ -682,6 +695,15 @@ static int crux_restart(struct sys_off_data *data)
 
 	crux_cut_started = true;
 	strscpy(crux_stage, "restart", sizeof(crux_stage));
+	/*
+	 * [crux 2026-10-11] 重启模式（data->cmd）优先：recovery / bootloader 这种
+	 * 要原样保留，代理写 IMEM 时会翻成对应码；其余一律记成 kernel-restart。
+	 */
+	if (data && data->cmd && data->cmd[0] &&
+	    (!strcmp(data->cmd, "recovery") || !strcmp(data->cmd, "bootloader")))
+		crux_reason_default(data->cmd);
+	else
+		crux_reason_default("kernel-restart");
 	crux_shutdown_report("agent", "RESTART begin, reason=%s", crux_reason);
 	pr_emerg("[crux] shutdown agent: restart (reason %s)\n", crux_reason);
 
@@ -746,6 +768,5 @@ MODULE_LICENSE("GPL");
 /* [crux port 7.3] 下面三个符号在 6.17 由 pm8941-pwrkey / msm-poweroff / x50-ssctl 提供，
  * 7.3 树尚未打这些补丁，先给占位实现保证链接；接管后请删除。
  */
-void crux_pon_force_type(bool shutdown) { (void)shutdown; }
 /* crux_pshold_cut() 现由 msm-poweroff.c 提供（真实现） */
 bool crux_x50_link_up(void) { return false; }

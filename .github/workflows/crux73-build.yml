@@ -1,0 +1,80 @@
+name: crux73-build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ crux-sm8150-73 ]
+    paths:
+      - 'arch/arm64/**'
+      - 'drivers/**'
+      - 'include/**'
+      - '.github/workflows/crux73-build.yml'
+
+jobs:
+  build:
+    # 公开仓库可用 arm64 原生 runner，与手机上的本地构建同架构，ccache 复用率更高
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 240
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_BASEDIR: ${{ github.workspace }}
+      CCACHE_COMPRESS: "1"
+      CCACHE_COMPILERCHECK: "content"
+      CCACHE_MAXSIZE: 6G
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: 安装依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential bc bison flex libssl-dev libelf-dev \
+            ccache gcc-aarch64-linux-gnu xz-utils rsync
+
+      - name: ccache 缓存（按内核源码树分桶）
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-crux73-${{ github.sha }}
+          restore-keys: |
+            ccache-crux73-
+
+      - name: 生成 .config
+        run: |
+          make crux73_defconfig
+          # 版本串必须与设备上已装的模块一致，否则 vermagic 不匹配、模块加载不了
+          scripts/config --disable LOCALVERSION_AUTO
+          scripts/config --set-str LOCALVERSION "-00037-g551c722f4080-dirty"
+          # 云端不含 87MB 私有固件（fw_extra）；设备 /lib/firmware 里都有一份，
+          # 因此这里不内嵌，改由 rootfs 提供（已实机核对 7 个关键固件都在）。
+          scripts/config --disable EXTRA_FIRMWARE
+          make ARCH=arm64 olddefconfig
+          echo "--- 关键项 ---"
+          grep -E '^CONFIG_(LOCALVERSION|EXTRA_FIRMWARE|LOCALVERSION_AUTO)' .config || true
+
+      - name: 编译 Image.gz + dtbs
+        run: |
+          make ARCH=arm64 CROSS_COMPILE="ccache aarch64-linux-gnu-" -j$(nproc) Image.gz dtbs
+
+      - name: ccache 统计
+        if: always()
+        run: ccache -s
+
+      - name: 汇总产物
+        run: |
+          mkdir -p out
+          cp arch/arm64/boot/Image.gz out/
+          cp arch/arm64/boot/dts/qcom/sm8150-xiaomi-crux.dtb out/
+          ls -l out/
+          (cd out && md5sum * | tee ../out.md5)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: crux73-kernel-${{ github.sha }}
+          path: |
+            out/Image.gz
+            out/sm8150-xiaomi-crux.dtb
+            out.md5
+          if-no-files-found: error

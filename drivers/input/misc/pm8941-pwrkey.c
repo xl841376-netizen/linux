@@ -17,6 +17,7 @@
 #include <linux/platform_device.h>
 #include <linux/reboot.h>
 #include <linux/regmap.h>
+#include <linux/crux_shutdown.h>
 
 #define PON_REV2			0x01
 
@@ -83,6 +84,11 @@ struct pm8941_pwrkey {
 	bool last_status;
 	const struct pm8941_data *data;
 };
+
+/*
+ * [crux 2026-10-11] 关机代理“最后期限”出口要用的那台 PON，在 probe 末尾登记。
+ */
+static struct pm8941_pwrkey *crux_pwrkey;
 
 static int pm8941_reboot_notify(struct notifier_block *nb,
 				unsigned long code, void *unused)
@@ -409,6 +415,9 @@ static int pm8941_pwrkey_probe(struct platform_device *pdev)
 	platform_set_drvdata(pdev, pwrkey);
 	device_init_wakeup(&pdev->dev, wakeup);
 
+
+	/* [crux 2026-10-11] 登记给关机代理的最后期限用 */
+	crux_pwrkey = pwrkey;
 	return 0;
 }
 
@@ -484,3 +493,55 @@ module_platform_driver(pm8941_pwrkey_driver);
 
 MODULE_DESCRIPTION("PM8941 Power Key driver");
 MODULE_LICENSE("GPL v2");
+
+/*
+ * [crux 2026-10-11] 关机代理“最后期限”出口：断电前把 PON 的 PS_HOLD 动作定向
+ * 配好（shutdown / hard reset），免得该关机却做成了硬复位。
+ * 会睡眠（3 个 sleep 周期的时序要求），只能从进程上下文调用。
+ */
+void crux_pon_force_type(bool shutdown)
+{
+	struct pm8941_pwrkey *pwrkey = crux_pwrkey;
+	unsigned int enable_reg, reset_type, rd = 0;
+	int error;
+
+	if (!pwrkey || !pwrkey->regmap)
+		return;
+
+	enable_reg = pwrkey->revision == 0 ? PON_PS_HOLD_RST_CTL :
+		PON_PS_HOLD_RST_CTL2;
+	reset_type = shutdown ? PON_PS_HOLD_TYPE_SHUTDOWN :
+		PON_PS_HOLD_TYPE_HARD_RESET;
+
+	error = regmap_update_bits(pwrkey->regmap,
+				   pwrkey->baseaddr + enable_reg,
+				   PON_PS_HOLD_ENABLE, 0);
+	if (error)
+		dev_err(pwrkey->dev, "[crux] pon-force clear enable: %d\n",
+			error);
+
+	usleep_range(100, 1000);
+
+	error = regmap_update_bits(pwrkey->regmap,
+				   pwrkey->baseaddr + PON_PS_HOLD_RST_CTL,
+				   PON_PS_HOLD_TYPE_MASK, reset_type);
+	if (error)
+		dev_err(pwrkey->dev, "[crux] pon-force set type: %d\n", error);
+
+	error = regmap_update_bits(pwrkey->regmap,
+				   pwrkey->baseaddr + enable_reg,
+				   PON_PS_HOLD_ENABLE, PON_PS_HOLD_ENABLE);
+	if (error)
+		dev_err(pwrkey->dev, "[crux] pon-force re-enable: %d\n",
+			error);
+
+	if (!regmap_read(pwrkey->regmap,
+			 pwrkey->baseaddr + PON_PS_HOLD_RST_CTL, &rd))
+		crux_shutdown_report("pon-force",
+				     "RST_CTL=0x%02x type=%u want=%u %s",
+				     rd, rd & PON_PS_HOLD_TYPE_MASK,
+				     reset_type,
+				     (rd & PON_PS_HOLD_TYPE_MASK) == reset_type ?
+				     "ok" : "MISMATCH");
+}
+EXPORT_SYMBOL_GPL(crux_pon_force_type);

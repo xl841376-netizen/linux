@@ -1769,3 +1769,36 @@
 	regulator-max-microamp = <3000000>;
 	status = "okay";
 };
+
+/*
+ * [crux 2026-10-11] IMEM：给关机代理留痕用（重启原因 / 触控 park 标记），
+ * 都扛得住 PS_HOLD 真断电。代理按 compatible "qcom,msm-imem" 找，
+ * 子节点名固定为 restart_reason 与 crux_parked。
+ */
+&soc {
+	qcom,msm-imem@146bf000 {
+		compatible = "qcom,msm-imem";
+		reg = <0 0x146bf000 0 0x1000>;
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		restart_reason@65c {
+			compatible = "qcom,msm-imem-restart_reason";
+			reg = <0x65c 0x4>;
+		};
+
+		crux_parked@868 {
+			compatible = "qcom,msm-imem-crux-parked";
+			reg = <0x868 0x4>;
+		};
+	};
+};
+
+/*
+ * [crux 2026-10-11] 关机必查项：这些驱动必须出现在 device_shutdown 的关机经过里，
+ * 否则代理会在 report 里报 MISSING。X50 相关（qcom-pcie / mhi-pci-generic）暂不列，
+ * 免得每轮误报。
+ */
+/ {
+	crux,shutdown-critical = "ufs_device_wlun", "adreno", "msm";
+};
