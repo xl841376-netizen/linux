@@ -41,15 +41,27 @@ jobs:
           restore-keys: |
             ccache-crux73-
 
+      - name: 校验 fw_extra（内嵌固件必须在案）
+        run: |
+          set -e
+          fs="qcom/sdx50m/sbl1.mbn qcom/a630_sqe.fw qcom/a640_gmu.bin \
+               qcom/sm8150/a640_zap.mbn qcom/sm8150/xiaomi/crux/a640_zap.mbn \
+               regulatory.db ftm5_fw.ftb qcom/sm8150/xiaomi/crux/adsp.mbn"
+          for f in $fs; do
+            if [ ! -s "fw_extra/$f" ]; then echo "缺少固件: fw_extra/$f"; exit 1; fi
+            printf '%-52s %10s\n' "$f" "$(stat -c %s "fw_extra/$f")"
+          done
+          echo "fw_extra 合计: $(du -sh fw_extra | cut -f1)"
+
       - name: 生成 .config
         run: |
           make crux73_defconfig
           # 版本串必须与设备上已装的模块一致，否则 vermagic 不匹配、模块加载不了
           scripts/config --disable LOCALVERSION_AUTO
           scripts/config --set-str LOCALVERSION "-00037-g551c722f4080-dirty"
-          # 云端不含 87MB 私有固件（fw_extra）；设备 /lib/firmware 里都有一份，
-          # 因此这里不内嵌，改由 rootfs 提供（已实机核对 7 个关键固件都在）。
-          scripts/config --disable EXTRA_FIRMWARE
+          # 固件同样是内嵌的：fw_extra/ 里那 8 个（约 15MB）已随仓库在案，
+          # 其中 adsp.mbn 是本机拼接版（与设备 /lib/firmware 同一份）。
+          scripts/config --enable EXTRA_FIRMWARE
           make ARCH=arm64 olddefconfig
           echo "--- 关键项 ---"
           grep -E '^CONFIG_(LOCALVERSION|EXTRA_FIRMWARE|LOCALVERSION_AUTO)' .config || true
