@@ -50,3 +50,36 @@ ssh root@crux.local
 # NPU 服务接口（设备侧本地 unix socket）
 /run/npu.sock
 ```
+
+
+---
+
+## 3. 内核内嵌固件（`CONFIG_EXTRA_FIRMWARE`，共 8 个 / ≈14 MB）
+
+设备上的固件**有两份、内容同一套**：
+
+| 位置 | 作用 | 说明 |
+|---|---|---|
+| **内核内嵌** | 编译期打进内核镜像（`CONFIG_EXTRA_FIRMWARE`） | 只放**驱动 probe 路径同步请求、且请求时刻早于根挂载的**固件，避免"固件还没找到驱动就 probe 失败" |
+| **rootfs `/lib/firmware/`** | 运行时常规 firmware_class 加载 | 其余全部固件都在这里；路径必须与内核/用户态请求字符串逐字一致 |
+
+源码树里对应目录是 **`fw_extra/`**（`CONFIG_EXTRA_FIRMWARE_DIR="fw_extra"`）。该目录总共 87 MB / 20 个文件，但**只有下面这 8 个进入内核**，其余（含 X50 的 `qdsp6sw.mbn` 71 MB 等）只是存料，不参与构建。
+
+| # | 路径（`fw_extra/` 下） | 大小 | 供谁用 |
+|---|---|---|---|
+| 1 | `qcom/sm8150/xiaomi/crux/adsp.mbn` | 14 663 828 B | ADSP（音频/传感器 DSP）remoteproc |
+| 2 | `qcom/sdx50m/sbl1.mbn` | 328 324 B | 外挂 X50 基带 boot 链（MHI/PCIe 侧） |
+| 3 | `ftm5_fw.ftb` | 101 720 B | `fts` 触摸屏控制器固件 |
+| 4 | `qcom/a640_gmu.bin` | 37 680 B | Adreno 640 GMU |
+| 5 | `qcom/a630_sqe.fw` | 32 304 B | Adreno 图形命令队列固件 |
+| 6 | `qcom/sm8150/a640_zap.mbn` | 14 256 B | Adreno zap（安全处理器）固件 |
+| 7 | `qcom/sm8150/xiaomi/crux/a640_zap.mbn` | 14 256 B | 同上，机型定制路径副本 |
+| 8 | `regulatory.db` | 6 380 B | 无线管制域数据库（WiFi） |
+
+### 通用性说明（不是逐台唯一的）
+
+- **逐台唯一**的东西（MAC 地址、RF 校准、传感器标定、EFS/persist/NV）**在分区里**，不在这 8 个文件里 —— 换机从原厂件重新铺 `/lib/firmware` 即可通用。
+- 这 8 个按性质分三档：**SoC 级**（`a630_sqe.fw`、`a640_gmu.bin`、`a640_zap.mbn`、`regulatory.db`）、**机型级**（`ftm5_fw.ftb`）、**模块级**（`sdx50m/sbl1.mbn`）。
+- ⚠️ **唯一例外**：`qcom/sm8150/xiaomi/crux/adsp.mbn` 是**本机拼接改过的定制件**（14663828 B，原厂件 14637824 B；拆分段 `adsp.b00..b09` 与拼接备份留在设备侧 `_split_bak/`）。换一台 crux 应改用**那台的原厂 adsp.mbn**，或按同样方式重新拼接。
+
+> 云端 CI（`.github/workflows/crux73-build.yml`，分支 `crux-sm8150-73`）已把这 8 个一并入库，构建前有一步自检：缺任一文件直接失败，保证云端产物与本地一致。
