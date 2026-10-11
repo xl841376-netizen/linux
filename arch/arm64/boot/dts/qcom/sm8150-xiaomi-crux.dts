@@ -1760,3 +1760,12 @@
 		};
 	};
 };
+
+/* [crux 7.3] 启用 pm8150b 的 USB VBUS regulator：typec 的 vdd-vbus-supply 需要它，
+ * 否则 qcom,pmic-typec 一直 EPROBE_DEFER（typec port 不注册、角色切换起不来）。
+ * 与 6.17 已验证配置一致。 */
+&pm8150b_vbus {
+	regulator-min-microamp = <500000>;
+	regulator-max-microamp = <3000000>;
+	status = "okay";
+};
