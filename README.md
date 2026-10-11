@@ -56,7 +56,7 @@ ssh root@crux.local
 
 ## 3. 内核内嵌固件（`CONFIG_EXTRA_FIRMWARE`，共 8 个 / ≈14 MB）
 
-设备上的固件**有两份、内容同一套**：
+设备上的固件**有两份、内容同一套**。**内嵌的唯一目的是：① 加载更快（省去运行时去 rootfs / 分区里查找的开销）；② 在没有分区挂载的时候（根文件系统挂载之前）也能提前拿到固件。**
 
 | 位置 | 作用 | 说明 |
 |---|---|---|
@@ -64,6 +64,8 @@ ssh root@crux.local
 | **rootfs `/lib/firmware/`** | 运行时常规 firmware_class 加载 | 其余全部固件都在这里；路径必须与内核/用户态请求字符串逐字一致 |
 
 源码树里对应目录是 **`fw_extra/`**（`CONFIG_EXTRA_FIRMWARE_DIR="fw_extra"`）。该目录总共 87 MB / 20 个文件，但**只有下面这 8 个进入内核**，其余（含 X50 的 `qdsp6sw.mbn` 71 MB 等）只是存料，不参与构建。
+
+> **不想要内嵌可以自行关闭**：把 `CONFIG_EXTRA_FIRMWARE` 关掉即可（`scripts/config --disable EXTRA_FIRMWARE`，或清空该项）；届时这些固件改由 rootfs `/lib/firmware/`（或分区）在运行时提供，代价是启动早期那次同步请求可能失败或变慢（取决于驱动 probe 的时机）。
 
 | # | 路径（`fw_extra/` 下） | 大小 | 供谁用 |
 |---|---|---|---|
