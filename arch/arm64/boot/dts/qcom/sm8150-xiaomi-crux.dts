@@ -1841,7 +1841,13 @@
 &uart13 {
 	status = "okay";
 	pinctrl-names = "default";
-	pinctrl-0 = <&qup_uart13_ctsrtsrx &qup_uart13_tx &bt_en_default>;
+	/*
+	 * [crux 2026-10-11] 这里**不能**带 &bt_en_default：主线的 pinctrl-sm8150
+	 * 对 gpio172 做 pinmux 时 pin_request 返回 -EINVAL（valid_mask 不含该线），
+	 * 会让整个 uart13 probe 失败（dmesg: pin-172 (c8c000.serial) error -EINVAL）。
+	 * 该引脚组保留在下面做记录，改由硬件默认状态/后续方案处理。
+	 */
+	pinctrl-0 = <&qup_uart13_ctsrtsrx &qup_uart13_tx>;
 
 	bluetooth {
 		compatible = "qcom,wcn3990-bt";
