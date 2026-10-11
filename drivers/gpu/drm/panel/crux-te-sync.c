@@ -165,6 +165,13 @@ static void crux_dump(struct crux_te *t)
                     nm[i], t->prev[i], v[i]);
         }
     }
+
+    /*
+     * [crux 2026-10-11] 报过就接受为“新基线”：同一个值不再重复刷屏；
+     * 只有它再次变化时才会再报一次（真正的边沿触发）。
+     */
+    for (i = 0; i < n; i++)
+        t->prev[i] = v[i];
 }
 
 static ssize_t stats_read(struct file *f, char __user *u, size_t n, loff_t *o)
