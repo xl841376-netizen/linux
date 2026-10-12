@@ -607,6 +607,15 @@
 			opp-hz = /bits/ 64 <2841600000>;
 			opp-peak-kBps = <8368000 51609600>;
 		};
+
+		/*
+		 * [crux 2026-10-12] 硬件 LUT 里有个 turbo 档 2.9568GHz，
+		 * qcom-cpufreq-hw 要能把它的电压 adjust 到 OPP 上，DT 里必须先有这条。
+		 */
+		cpu7_opp21: opp-2956800000 {
+			opp-hz = /bits/ 64 <2956800000>;
+			opp-peak-kBps = <8368000 51609600>;
+		};
 	};
 
 	firmware {
