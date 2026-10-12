@@ -3,6 +3,7 @@
 > 本页**只记录当前设备上实际可用**的部分，逐项都有实机证据。
 > 采集时间：**2026-10-11 08:30**（设备连续运行中）
 > 仓库定位：本仓库为 `torvalds/linux` 的 fork；移植代码在分支 `crux-sm8150-73`。
+> 相关仓库：[`crux-grub`](https://github.com/xl841376-netizen/crux-grub)（GRUB 引导层：aarch64-efi standalone + cruxdisplay 显示交接模块）｜UEFI 侧 fork [`Mu-Silicium` 分支 `crux-port-next`](https://github.com/xl841376-netizen/Mu-Silicium/tree/crux-port-next)（Mu/Silicium 固件，基于云端最新 main + 仅本机改动）｜[`crux-minimal-rootfs`](https://github.com/xl841376-netizen/crux-minimal-rootfs)（最小 rootfs）。
 
 ---
 
@@ -29,7 +30,7 @@
 | **物理按键** | 可用 | `pm8941_pwrkey`、`pm8941_resin`、`gpio-keys` 三个输入设备已注册 |
 | **存储（UFS）** | 可用 | 控制器 `1d84000.ufshc`；`/dev/sda` 475.6G 全部 37 个分区可读；`sda36`=`linux-root`(64G)、`sda37`=`linux-root26`(24G，当前根)、`sda35`=`efi`(512M) |
 | **读取 Android 分区** | 可用 | `sda32`=`vendor` 挂 `/vendor`，`sda33`=`system` 挂 `/mnt/sys`（只读参考，不回写） |
-| **WiFi** | 可用 | `ath10k_snoc` 已加载；`wlan0 UP 192.168.1.157/24`，关联 `CMCC-GuFS`（NM 连接 `cmcc24`），另有两个全局 IPv6 地址 |
+| **WiFi** | 可用 | `ath10k_snoc` 已加载；`wlan0 UP 192.168.1.157/24`，关联 `CMCC-GuFS`（NM 连接 `cmcc24`），另有两个全局 IPv6 地址。**注**：固件偶发自我复位会产生少量日志噪声（见 §4），**不影响正常连接与使用** |
 | **远程访问** | 可用 | 经 WiFi 以 `crux.local`（mDNS）SSH 直连；USB ECM 通道 UDC `a600000.usb` 与 `usb0`（192.168.2.2/24）已就位 |
 | **四颗 DSP（remoteproc）** | 可用 | `slpi / modem / cdsp / adsp` 全部 `running`；固件自 `qcom/sm8150/xiaomi/crux/*.mbn` 加载（如 `slpi.mbn` 8.06MB 已起） |
 | **Modem 用户态服务** | 可用 | `rmtfs.service`、`tqftpserv.service`、`ModemManager.service` 常驻 active |
@@ -86,3 +87,16 @@ ssh root@crux.local
 - 参考：逐台唯一的数据（MAC 地址、RF 校准、传感器标定、EFS/persist/NV）本就在**分区**里，不在这些固件文件中；本项目所用的 `qcom/sm8150/xiaomi/crux/adsp.mbn` 为某台实机的拼接件，如果你的设备用原厂件无效或有效，请以实测为准。
 
 > 云端 CI（`.github/workflows/crux73-build.yml`，分支 `crux-sm8150-73`）已把这 8 个一并入库，构建前有一步自检：缺任一文件直接失败，保证云端产物与本地一致。
+
+---
+
+## 4. 已知噪声（不影响连接与使用）
+
+| 现象 | 出处 | 说明 |
+|---|---|---|
+| **WiFi 固件偶发自我复位**：`firmware crashed! (guid …)`，数十秒后 `device successfully recovered`；期间伴随少量 `failed to transmit packet, dropping: -108`、`failed to submit/push frame` 与 `chan info: invalid frequency 0 (idx 41 out of bounds)` | `ath10k`（`snoc.c` / `mac.c` / `wmi.c`） | **不影响正常连接与使用**（2.4GHz / 5GHz 均可正常关联、传输，实测 5GHz ch48 通过）。**要修请自行处理**：本移植已把这 5 条由 `ath10k_err/warn/info` 降级为 `ath10k_dbg`；需要看回日志时，在 cmdline 的 `ath10k_core.debug_mask` 里加上 `0x10`(MAC) / `0x800`(REGULATORY) / `0x100000`(SNOC) 即可 |
+| **GPU fault 告警**：每约 60 秒一条 `gpu fault … source=CCU type=TRANSLATION` | `drm/msm` | **不影响出图**（桌面/合成正常），属调试噪声 |
+| **Modem 自愈**：`crash detected … fatal error` → `recovering`（内置 modem 按 MCFG 激活有意重启一次） | `remoteproc` / `mcfg_utils` | **不影响联网**，起来后 `running` |
+
+> 以上均为**装饰性/无害**问题，标注为"不影响正常连接与使用"；**要修请自行处理**。
+
