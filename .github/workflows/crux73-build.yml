@@ -132,7 +132,7 @@ jobs:
           T=out/modules-${KVER}.tar.zst
           test -s "$T"
           # 模块目录名必须就是 KVER
-          d=$(tar -tf "$T" | grep -m1 "lib/modules/.*/" | cut -d/ -f3)
+          d=$(tar -tf "$T" | grep -o "lib/modules/[^/][^/]*" | head -1 | cut -d/ -f3)
           [ "$d" = "$KVER" ] || { echo "模块目录名 $d != $KVER"; exit 1; }
           echo "模块数: $(tar -tf "$T" | grep -c '\.ko$')"
           # 关键模块必须在
