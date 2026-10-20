@@ -7,6 +7,7 @@
 #include <linux/bitfield.h>
 #include <linux/bits.h>
 #include <linux/dma-direction.h>
+#include <linux/jiffies.h>
 #include <linux/refcount.h>
 #include <linux/scatterlist.h>
 #include <linux/types.h>
@@ -619,7 +620,19 @@ void gsi_trans_commit_wait(struct gsi_trans *trans)
 
 	__gsi_trans_commit(trans, true);
 
-	wait_for_completion(&trans->completion);
+	/*
+	 * [crux 2026-10-15] Bound the wait. Every caller of this function
+	 * is a command channel operation, never a data path, and command
+	 * transactions complete in microseconds on a working device. An
+	 * unbounded wait here turns a modem crash into a dead IPA (and a
+	 * phone that needs rebooting). Returning early is safe: the extra
+	 * reference taken above is only dropped in gsi_trans_free(), which
+	 * still runs from the GSI completion path.
+	 */
+	if (!wait_for_completion_timeout(&trans->completion,
+					 msecs_to_jiffies(1000)))
+		dev_err(trans->gsi->dev,
+			"transaction did not complete in 1000ms\n");
 
 out_trans_free:
 	gsi_trans_free(trans);

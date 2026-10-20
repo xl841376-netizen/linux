@@ -722,3 +722,204 @@ const struct qmi_elem_info ipa_init_modem_driver_rsp_ei[] = {
 		.data_type	= QMI_EOTI,
 	},
 };
+
+/* [crux 2026-10-16] IPA-MHI proxy ready indication (AP -> modem), byte blob */
+const struct qmi_elem_info ipa_mhi_ready_ind_msg_ei[] = {
+	{
+		.data_type	= QMI_DATA_LEN,
+		.elem_len	= 1,
+		.elem_size	= sizeof_field(struct ipa_mhi_ready_ind_msg, payload_len),
+		.array_type	= NO_ARRAY,
+		.tlv_type	= 0x01,
+		.offset		= offsetof(struct ipa_mhi_ready_ind_msg, payload_len),
+	},
+	{
+		.data_type	= QMI_UNSIGNED_1_BYTE,
+		.elem_len	= sizeof_field(struct ipa_mhi_ready_ind_msg, payload),
+		.elem_size	= sizeof(u8),
+		.array_type	= VAR_LEN_ARRAY,
+		.tlv_type	= 0x01,
+		.offset		= offsetof(struct ipa_mhi_ready_ind_msg, payload),
+	},
+	{ },
+};
+
+/* [crux 2026-10-16] MHI_ALLOC_CHANNEL request (modem -> AP), byte blob */
+const struct qmi_elem_info ipa_mhi_alloc_ch_req_ei[] = {
+	{
+		.data_type	= QMI_DATA_LEN,
+		.elem_len	= 1,
+		.elem_size	= sizeof_field(struct ipa_mhi_alloc_ch_req, payload_len),
+		.array_type	= NO_ARRAY,
+		.tlv_type	= 0x01,
+		.offset		= offsetof(struct ipa_mhi_alloc_ch_req, payload_len),
+	},
+	{
+		.data_type	= QMI_UNSIGNED_1_BYTE,
+		.elem_len	= sizeof_field(struct ipa_mhi_alloc_ch_req, payload),
+		.elem_size	= sizeof(u8),
+		.array_type	= VAR_LEN_ARRAY,
+		.tlv_type	= 0x01,
+		.offset		= offsetof(struct ipa_mhi_alloc_ch_req, payload),
+	},
+	{
+		.data_type	= QMI_DATA_LEN,
+		.elem_len	= 1,
+		.elem_size	= sizeof_field(struct ipa_mhi_alloc_ch_req, er_payload_len),
+		.array_type	= NO_ARRAY,
+		.tlv_type	= 0x02,
+		.offset		= offsetof(struct ipa_mhi_alloc_ch_req, er_payload_len),
+	},
+	{
+		.data_type	= QMI_UNSIGNED_1_BYTE,
+		.elem_len	= sizeof_field(struct ipa_mhi_alloc_ch_req, er_payload),
+		.elem_size	= sizeof(u8),
+		.array_type	= VAR_LEN_ARRAY,
+		.tlv_type	= 0x02,
+		.offset		= offsetof(struct ipa_mhi_alloc_ch_req, er_payload),
+	},
+	{ },
+};
+
+const struct qmi_elem_info ipa_mhi_alloc_ch_rsp_ei[] = {
+	{
+		.data_type	= QMI_STRUCT,
+		.elem_len	= 1,
+		.elem_size	= sizeof(struct qmi_response_type_v01),
+		.array_type	= NO_ARRAY,
+		.tlv_type	= 0x02,
+		.offset		= offsetof(struct ipa_mhi_alloc_ch_rsp, rsp),
+		.ei_array	= qmi_response_type_v01_ei,
+	},
+	{ },
+};
+
+/* [crux 2026-10-19] 对齐原厂 ipa_mhi_ch_init_info_type_v01_ei：
+ * 每个描述符 5 个标量字段，tlv_type=0（嵌在父 TLV 里）。
+ */
+const struct qmi_elem_info crux_mhi_ch_desc_ei[] = {
+	{
+		.data_type	= QMI_UNSIGNED_1_BYTE,
+		.elem_len	= 1,
+		.elem_size	= sizeof(u8),
+		.array_type	= NO_ARRAY,
+		.tlv_type	= 0,
+		.offset		= offsetof(struct ipa_mhi_ch_init_info, ch_id),
+	},
+	{
+		.data_type	= QMI_UNSIGNED_1_BYTE,
+		.elem_len	= 1,
+		.elem_size	= sizeof(u8),
+		.array_type	= NO_ARRAY,
+		.tlv_type	= 0,
+		.offset		= offsetof(struct ipa_mhi_ch_init_info, er_id),
+	},
+	{
+		.data_type	= QMI_UNSIGNED_4_BYTE,
+		.elem_len	= 1,
+		.elem_size	= sizeof(u32),
+		.array_type	= NO_ARRAY,
+		.tlv_type	= 0,
+		.offset		= offsetof(struct ipa_mhi_ch_init_info, ch_doorbell_addr),
+	},
+	{
+		.data_type	= QMI_UNSIGNED_4_BYTE,
+		.elem_len	= 1,
+		.elem_size	= sizeof(u32),
+		.array_type	= NO_ARRAY,
+		.tlv_type	= 0,
+		.offset		= offsetof(struct ipa_mhi_ch_init_info, er_doorbell_addr),
+	},
+	{
+		.data_type	= QMI_UNSIGNED_4_BYTE,
+		.elem_len	= 1,
+		.elem_size	= sizeof(u32),
+		.array_type	= NO_ARRAY,
+		.tlv_type	= 0,
+		.offset		= offsetof(struct ipa_mhi_ch_init_info, direction),
+	},
+	{ }
+};
+
+/* [crux 2026-10-19] 对齐原厂 ipa_mhi_ready_indication_msg_v01_ei：
+ * TLV 0x01 = [len][ch_info_arr...]；smmu_info 可选，我们不启用。
+ */
+/* [crux 2026-10-19] 对齐原厂 ipa_mhi_smmu_info_type_v01_ei：4 x UNSIGNED_8_BYTE */
+const struct qmi_elem_info crux_mhi_smmu_info_ei[] = {
+	{
+		.data_type	= QMI_UNSIGNED_8_BYTE,
+		.elem_len	= 1,
+		.elem_size	= sizeof(u64),
+		.array_type	= NO_ARRAY,
+		.tlv_type	= 0,
+		.offset		= offsetof(struct crux_mhi_smmu_info, iova_ctl_base_addr),
+	},
+	{
+		.data_type	= QMI_UNSIGNED_8_BYTE,
+		.elem_len	= 1,
+		.elem_size	= sizeof(u64),
+		.array_type	= NO_ARRAY,
+		.tlv_type	= 0,
+		.offset		= offsetof(struct crux_mhi_smmu_info, iova_ctl_size),
+	},
+	{
+		.data_type	= QMI_UNSIGNED_8_BYTE,
+		.elem_len	= 1,
+		.elem_size	= sizeof(u64),
+		.array_type	= NO_ARRAY,
+		.tlv_type	= 0,
+		.offset		= offsetof(struct crux_mhi_smmu_info, iova_data_base_addr),
+	},
+	{
+		.data_type	= QMI_UNSIGNED_8_BYTE,
+		.elem_len	= 1,
+		.elem_size	= sizeof(u64),
+		.array_type	= NO_ARRAY,
+		.tlv_type	= 0,
+		.offset		= offsetof(struct crux_mhi_smmu_info, iova_data_size),
+	},
+	{ }
+};
+
+const struct qmi_elem_info crux_mhi_ready_ind_ei[] = {
+	{
+		.data_type	= QMI_DATA_LEN,
+		.elem_len	= 1,
+		/* [crux 2026-10-19] 原厂用 sizeof(u8) → 长度字段编码为【1 字节】。
+		 * 写成 sizeof(u32) 会输出 2 字节(00 02)，modem 解析整段 TLV 错位、
+		 * 静默丢弃，0x3d 永不回来。
+		 */
+		.elem_size	= sizeof(u8),
+		.array_type	= NO_ARRAY,
+		.tlv_type	= 0x01,
+		.offset		= offsetof(struct crux_mhi_ready_ind, ch_info_arr_len),
+	},
+	{
+		.data_type	= QMI_STRUCT,
+		.elem_len	= 2,
+		.elem_size	= sizeof(struct ipa_mhi_ch_init_info),
+		.array_type	= VAR_LEN_ARRAY,
+		.tlv_type	= 0x01,
+		.offset		= offsetof(struct crux_mhi_ready_ind, ch),
+		.ei_array	= crux_mhi_ch_desc_ei,
+	},
+	/* [crux 2026-10-19] 可选 smmu_info TLV(0x10)，与原厂一致 */
+	{
+		.data_type	= QMI_OPT_FLAG,
+		.elem_len	= 1,
+		.elem_size	= sizeof(u8),
+		.array_type	= NO_ARRAY,
+		.tlv_type	= 0x10,
+		.offset		= offsetof(struct crux_mhi_ready_ind, smmu_info_valid),
+	},
+	{
+		.data_type	= QMI_STRUCT,
+		.elem_len	= 1,
+		.elem_size	= sizeof(struct crux_mhi_smmu_info),
+		.array_type	= NO_ARRAY,
+		.tlv_type	= 0x10,
+		.offset		= offsetof(struct crux_mhi_ready_ind, smmu_info),
+		.ei_array	= crux_mhi_smmu_info_ei,
+	},
+	{ }
+};

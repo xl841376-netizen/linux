@@ -19,7 +19,7 @@
 	qcom,support-shutdown;
 	qcom,pil-force-shutdown;
 	pinctrl-names = "default", "mdm_active", "mdm_suspend";
-	pinctrl-0 = <&ap2mdm_pon_reset_default>;
+	pinctrl-0 = <&ap2mdm_pon_reset_default &crux_qlink_request &crux_qlink_enable>;
 	pinctrl-1 = <&ap2mdm_active &mdm2ap_active>;
 	pinctrl-2 = <&ap2mdm_sleep &mdm2ap_sleep>;
 	interrupt-map = <0 &tlmm 0x35 IRQ_TYPE_LEVEL_HIGH>, <1 &tlmm 0x87 IRQ_TYPE_LEVEL_HIGH>;
@@ -106,6 +106,24 @@
 	bias-disable;
 	};
 	};
+	};
+};
+
+/* [crux 2026-10-20] 外挂 X50 的 Q-Link 请求/使能脚（gpio61/gpio62）。
+ * 主线 pinctrl-sm8150.c 已定义 qlink_request / qlink_enable 两个 function，
+ * 这里只是给 mdm3 的 default 状态挂上，和设备现有 dtb 保持一致。
+ */
+&tlmm {
+	crux_qlink_request: crux-qlink-request {
+		pins = "gpio61";
+		function = "qlink_request";
+		bias-disable;
+	};
+
+	crux_qlink_enable: crux-qlink-enable {
+		pins = "gpio62";
+		function = "qlink_enable";
+		bias-disable;
 	};
 };
 

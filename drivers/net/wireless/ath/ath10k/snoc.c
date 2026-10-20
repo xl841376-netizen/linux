@@ -1506,7 +1506,7 @@ void ath10k_snoc_fw_crashed_dump(struct ath10k *ar)
 	else
 		scnprintf(guid, sizeof(guid), "n/a");
 
-	ath10k_err(ar, "firmware crashed! (guid %s)\n", guid);
+	ath10k_dbg(ar, ATH10K_DBG_SNOC, "firmware crashed! (guid %s)\n", guid);
 	ath10k_print_driver_info(ar);
 	ath10k_msa_dump_memory(ar, crash_data);
 	mutex_unlock(&ar->dump_mutex);

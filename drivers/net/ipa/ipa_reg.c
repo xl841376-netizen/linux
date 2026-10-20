@@ -114,6 +114,8 @@ static const struct regs *ipa_regs(enum ipa_version version)
 		return &ipa_regs_v3_1;
 	case IPA_VERSION_3_5_1:
 		return &ipa_regs_v3_5_1;
+	case IPA_VERSION_4_1:
+		return &ipa_regs_v4_1;
 	case IPA_VERSION_4_2:
 		return &ipa_regs_v4_2;
 	case IPA_VERSION_4_5:
@@ -152,6 +154,13 @@ int ipa_reg_init(struct ipa *ipa, struct platform_device *pdev)
 	if (!res) {
 		dev_err(dev, "DT error getting \"ipa-reg\" memory property\n");
 		return -ENODEV;
+	}
+
+	/* [crux 2026-10-19] 记录 ipa-reg 物理基，供 uC mailbox 地址计算 */
+	{
+		extern phys_addr_t crux_ipa_reg_phys;
+
+		crux_ipa_reg_phys = res->start;
 	}
 
 	ipa->reg_virt = ioremap(res->start, resource_size(res));

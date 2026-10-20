@@ -18,7 +18,7 @@
 		qcom,support-shutdown;
 		qcom,pil-force-shutdown;
 		pinctrl-names = "default", "mdm_active", "mdm_suspend";
-		pinctrl-0 = <&ap2mdm_pon_reset_default>;
+		pinctrl-0 = <&ap2mdm_pon_reset_default &crux_qlink_request &crux_qlink_enable>;
 		pinctrl-1 = <&ap2mdm_active &mdm2ap_active>;
 		pinctrl-2 = <&ap2mdm_sleep &mdm2ap_sleep>;
 		interrupt-map = <0 &tlmm 53 3 1 &tlmm 135 3>;
@@ -97,7 +97,7 @@
 		qcom,support-shutdown;
 		qcom,pil-force-shutdown;
 		pinctrl-names = "default", "mdm_active", "mdm_suspend";
-		pinctrl-0 = <&ap2mdm_pon_reset_default>;
+		pinctrl-0 = <&ap2mdm_pon_reset_default &crux_qlink_request &crux_qlink_enable>;
 		pinctrl-1 = <&ap2mdm_active &mdm2ap_active>;
 		pinctrl-2 = <&ap2mdm_sleep &mdm2ap_sleep>;
 		interrupt-map = <0 &tlmm 53 3 1 &tlmm 135 3>;

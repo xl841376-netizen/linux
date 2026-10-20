@@ -12,6 +12,7 @@
 #include <linux/device.h>
 #include <linux/mhi.h>
 #include <linux/module.h>
+#include <linux/crux_dep.h>
 #include <linux/pci.h>
 #include <linux/pm_runtime.h>
 #include <linux/timer.h>
@@ -330,6 +331,40 @@ static const struct mhi_channel_config modem_qcom_v1_mhi_channels[] = {
 	MHI_CHANNEL_CONFIG_HW_DL(101, "IP_HW0", 128, 5),
 };
 
+static const struct mhi_channel_config modem_qcom_sdx55_mhi_channels[] = {
+	MHI_CHANNEL_CONFIG_UL_SBL(2, "SAHARA", 128, 1),
+	MHI_CHANNEL_CONFIG_DL_SBL(3, "SAHARA", 128, 1),
+	MHI_CHANNEL_CONFIG_UL(4, "DIAG", 64, 1),
+	MHI_CHANNEL_CONFIG_DL(5, "DIAG", 64, 3),
+	MHI_CHANNEL_CONFIG_UL(10, "EFS", 64, 1),
+	{
+		.num = 11,
+		.name = "EFS",
+		.num_elements = 64,
+		.event_ring = 1,
+		.dir = DMA_FROM_DEVICE,
+		.ee_mask = BIT(MHI_EE_AMSS),
+		.pollcfg = 0,
+		.doorbell = MHI_DB_BRST_DISABLE,
+		.lpm_notify = false,
+		.offload_channel = false,
+		.doorbell_mode_switch = false,
+		.wake_capable = true,
+	},
+	MHI_CHANNEL_CONFIG_UL(12, "MBIM", 4, 0),
+	MHI_CHANNEL_CONFIG_DL(13, "MBIM", 4, 0),
+	MHI_CHANNEL_CONFIG_UL(14, "QMI", 64, 1),
+	MHI_CHANNEL_CONFIG_DL(15, "QMI", 64, 2),
+	MHI_CHANNEL_CONFIG_UL(20, "IPCR", 64, 2),
+	MHI_CHANNEL_CONFIG_DL(21, "IPCR", 64, 2),
+	MHI_CHANNEL_CONFIG_UL_FP(34, "FIREHOSE", 32, 0),
+	MHI_CHANNEL_CONFIG_DL_FP(35, "FIREHOSE", 32, 0),
+	MHI_CHANNEL_CONFIG_UL(46, "IP_SW0", 64, 2),
+	MHI_CHANNEL_CONFIG_DL(47, "IP_SW0", 64, 3),
+	MHI_CHANNEL_CONFIG_HW_UL(100, "IP_HW0", 128, 4),
+	MHI_CHANNEL_CONFIG_HW_DL(101, "IP_HW0", 128, 5),
+};
+
 static struct mhi_event_config modem_qcom_v1_mhi_events[] = {
 	/* first ring is control+data ring */
 	MHI_EVENT_CONFIG_CTRL(0, 64),
@@ -338,6 +373,24 @@ static struct mhi_event_config modem_qcom_v1_mhi_events[] = {
 	/* Software channels dedicated event ring */
 	MHI_EVENT_CONFIG_SW_DATA(2, 64),
 	MHI_EVENT_CONFIG_SW_DATA(3, 64),
+	/* Hardware channels request dedicated hardware event rings */
+	MHI_EVENT_CONFIG_HW_DATA(4, 1024, 100),
+	MHI_EVENT_CONFIG_HW_DATA(5, 2048, 101)
+};
+
+static struct mhi_event_config modem_qcom_sdx55_mhi_events[] = {
+	/* first ring is control+data ring */
+	MHI_EVENT_CONFIG_CTRL(0, 64),
+	/*
+	 * Match the downstream SDX55M channel/event routing from Android DTS:
+	 * SAHARA, EFS, and QMI UL on ring 1, QMI/IPCR DL on ring 2, and DIAG
+	 * DL on ring 3.  The modem accepts the channel contexts in AMSS but
+	 * does not complete QMI control transfers when QMI0 is left on ring 0.
+	 */
+	MHI_EVENT_CONFIG_SW_DATA(1, 256),
+	/* Software channels dedicated event ring */
+	MHI_EVENT_CONFIG_SW_DATA(2, 256),
+	MHI_EVENT_CONFIG_SW_DATA(3, 256),
 	/* Hardware channels request dedicated hardware event rings */
 	MHI_EVENT_CONFIG_HW_DATA(4, 1024, 100),
 	MHI_EVENT_CONFIG_HW_DATA(5, 2048, 101)
@@ -392,13 +445,20 @@ static const struct mhi_controller_config modem_qcom_v1_mhiv_config = {
  *   bounce buffer。
  */
 static const struct mhi_channel_config mhi_qcom_sdx50m_channels[] = {
+	/* [crux 2026-10-19] 按原厂终态重排：sm8150-mhi.dtsi(base) +
+	 * sm8150-sdx50m.dtsi(覆盖层)。
+	 * 覆盖层动作：ch1/11/21 num-elements=32；ch104 加 mhi,offload-chan；
+	 * ch100/101/102/103/107/108/109/110 全部 status="disabled"。
+	 * 即 X50 数据面只走 104/105 offload 对，IP_HW0(100/101) 不用。
+	 */
+	MHI_CHANNEL_CONFIG_UL(0, "LOOPBACK", 32, 2),
+	MHI_CHANNEL_CONFIG_DL(1, "LOOPBACK", 32, 2),
 	MHI_CHANNEL_CONFIG_UL_SBL(2, "SAHARA", 128, 1),
 	MHI_CHANNEL_CONFIG_DL_SBL(3, "SAHARA", 128, 1),
-	MHI_CHANNEL_CONFIG_DL_SBL(25, "BL", 64, 2),
 	MHI_CHANNEL_CONFIG_UL(4, "DIAG", 64, 1),
 	MHI_CHANNEL_CONFIG_DL(5, "DIAG", 64, 3),
-	MHI_CHANNEL_CONFIG_UL(10, "EFS", 64, 1),
-	MHI_CHANNEL_CONFIG_DL(11, "EFS", 64, 1),
+	MHI_CHANNEL_CONFIG_UL(10, "EFS", 32, 1),
+	MHI_CHANNEL_CONFIG_DL(11, "EFS", 32, 1),
 	MHI_CHANNEL_CONFIG_UL(14, "QMI", 64, 1),
 	MHI_CHANNEL_CONFIG_DL(15, "QMI", 64, 2),
 	MHI_CHANNEL_CONFIG_UL(16, "QMI1", 64, 3),
@@ -406,15 +466,28 @@ static const struct mhi_channel_config mhi_qcom_sdx50m_channels[] = {
 	MHI_CHANNEL_CONFIG_UL(18, "IP_CTRL", 64, 1),
 	MHI_CHANNEL_CONFIG_DL(19, "IP_CTRL", 64, 1),
 	MHI_CHANNEL_CONFIG_UL(20, "IPCR", 64, 2),
-	MHI_CHANNEL_CONFIG_DL(21, "IPCR", 64, 2),
+	MHI_CHANNEL_CONFIG_DL(21, "IPCR", 32, 2),
+	MHI_CHANNEL_CONFIG_DL_SBL(25, "BL", 64, 2),
 	MHI_CHANNEL_CONFIG_UL(32, "DUN", 64, 3),
 	MHI_CHANNEL_CONFIG_DL(33, "DUN", 64, 3),
 	MHI_CHANNEL_CONFIG_UL_FP(34, "FIREHOSE", 32, 1),
 	MHI_CHANNEL_CONFIG_DL_FP(35, "FIREHOSE", 32, 1),
 	MHI_CHANNEL_CONFIG_UL(46, "IP_SW0", 64, 2),
 	MHI_CHANNEL_CONFIG_DL(47, "IP_SW0", 64, 3),
-	MHI_CHANNEL_CONFIG_HW_UL(100, "IP_HW0", 512, 5),
-	MHI_CHANNEL_CONFIG_HW_DL(101, "IP_HW0", 512, 6),
+	/* IP_HW_OFFLOAD_0：原厂 base 不标 offload，覆盖层给 104 加上；
+	 * 105 本来就带 offload+lpm。主线要求 num_elements 非 0，取 64。 */
+	{ .name = "IP_HW_OFFLOAD_0", .num = 104, .num_elements = 64,
+	  .event_ring = 5, .dir = DMA_TO_DEVICE,
+	  .type = MHI_CH_TYPE_OUTBOUND, .ee_mask = BIT(MHI_EE_AMSS),
+	  .pollcfg = 0, .doorbell = MHI_DB_BRST_ENABLE,
+	  .lpm_notify = false, .offload_channel = true,
+	  .doorbell_mode_switch = false },
+	{ .name = "IP_HW_OFFLOAD_0", .num = 105, .num_elements = 64,
+	  .event_ring = 6, .dir = DMA_FROM_DEVICE,
+	  .type = MHI_CH_TYPE_INBOUND, .ee_mask = BIT(MHI_EE_AMSS),
+	  .pollcfg = 0, .doorbell = MHI_DB_BRST_ENABLE,
+	  .lpm_notify = true, .offload_channel = true,
+	  .doorbell_mode_switch = false },
 };
 
 static struct mhi_event_config mhi_qcom_sdx50m_events[] = {
@@ -423,8 +496,17 @@ static struct mhi_event_config mhi_qcom_sdx50m_events[] = {
 	MHI_EVENT_CONFIG_DATA(2, 256),
 	MHI_EVENT_CONFIG_DATA(3, 256),
 	MHI_EVENT_CONFIG_SW_DATA(4, 64),
-	MHI_EVENT_CONFIG_HW_DATA(5, 1024, 100),
-	MHI_EVENT_CONFIG_HW_DATA(6, 2048, 101),
+	/* [crux 2026-10-19] 原厂覆盖层把 ER5/ER6 从 ch100/101 的 HW_DATA
+	 * 改成 ch104/105 的 offload 事件环：num-elements=0、client-manage、
+	 * offload、msi 不变、brst=3。主线对 0 元素事件环不做上下文初始化。 */
+	{ .num_elements = 0, .irq_moderation_ms = 0, .irq = 6,
+	  .channel = 104, .priority = 1, .mode = MHI_DB_BRST_ENABLE,
+	  .data_type = MHI_ER_DATA, .hardware_event = true,
+	  .client_managed = true, .offload_channel = true },
+	{ .num_elements = 0, .irq_moderation_ms = 0, .irq = 7,
+	  .channel = 105, .priority = 1, .mode = MHI_DB_BRST_ENABLE,
+	  .data_type = MHI_ER_DATA, .hardware_event = true,
+	  .client_managed = true, .offload_channel = true },
 };
 
 static const struct mhi_controller_config modem_qcom_sdx50m_mhiv_config = {
@@ -437,6 +519,15 @@ static const struct mhi_controller_config modem_qcom_sdx50m_mhiv_config = {
 	.ch_cfg = mhi_qcom_sdx50m_channels,
 	.num_events = ARRAY_SIZE(mhi_qcom_sdx50m_events),
 	.event_cfg = mhi_qcom_sdx50m_events,
+};
+
+static const struct mhi_controller_config modem_qcom_sdx55_mhiv_config = {
+	.max_channels = 128,
+	.timeout_ms = 8000,
+	.num_channels = ARRAY_SIZE(modem_qcom_sdx55_mhi_channels),
+	.ch_cfg = modem_qcom_sdx55_mhi_channels,
+	.num_events = ARRAY_SIZE(modem_qcom_sdx55_mhi_events),
+	.event_cfg = modem_qcom_sdx55_mhi_events,
 };
 
 static const struct mhi_pci_dev_info mhi_qcom_sa8775p_info = {
@@ -476,11 +567,20 @@ static const struct mhi_pci_dev_info mhi_qcom_sdx55_info = {
 	.fw = "qcom/sdx55m/sbl1.mbn",
 	.edl = "qcom/sdx55m/edl.mbn",
 	.edl_trigger = true,
-	.config = &modem_qcom_v1_mhiv_config,
+	.config = &modem_qcom_sdx55_mhiv_config,
 	.bar_num = MHI_PCI_DEFAULT_BAR_NUM,
 	.dma_data_width = 32,
 	.mru_default = 32768,
 	.sideband_wake = false,
+	/*
+	 * The SDX55M sits behind the SM8250 PCIe RC2, which cannot bring the
+	 * endpoint back from D3cold (no power/PERST resequencing on resume):
+	 * once MHI runtime-suspends to M3, the parent drops the link to D3cold
+	 * and the device never returns ("Unable to change power state from
+	 * D3cold to D0, device inaccessible" -> SYS ERROR -> link retrain fail).
+	 * Disable M3 so runtime suspend is never armed, matching qdu100.
+	 */
+	.no_m3 = true,
 };
 
 static const struct mhi_pci_dev_info mhi_qcom_sdx35_info = {
@@ -504,6 +604,11 @@ static const struct mhi_pci_dev_info mhi_qcom_sdx50m_info = {
 	.dma_data_width = 32,
 	.mru_default = 32768,
 	.sideband_wake = false,
+	/*
+	 * [crux 2026-10-17] X50 在 crux(SM8150) 上也会进 M3，唤醒失败 -5 -> 链路掉 -> X50 回 SBL。
+	 * 与 sdx55m 同理，禁掉 M3（runtime suspend 不再 arm）。
+	 */
+	.no_m3 = true,
 };
 
 static const struct mhi_pci_dev_info mhi_qcom_sdx24_info = {
@@ -1049,7 +1154,7 @@ static const struct pci_device_id mhi_pci_id_table[] = {
 	{ PCI_DEVICE(PCI_VENDOR_ID_QCOM, 0x0305),
 		.driver_data = (kernel_ulong_t) &mhi_qcom_sdx50m_info },
 	{ PCI_DEVICE_SUB(PCI_VENDOR_ID_QCOM, 0x0306, PCI_VENDOR_ID_QCOM, 0x010c),
-		.driver_data = (kernel_ulong_t) &mhi_foxconn_sdx55_info },
+		.driver_data = (kernel_ulong_t) &mhi_qcom_sdx55_info },
 	/* EM919x (sdx55), use the same vid:pid as qcom-sdx55m */
 	{ PCI_DEVICE_SUB(PCI_VENDOR_ID_QCOM, 0x0306, 0x18d7, 0x0200),
 		.driver_data = (kernel_ulong_t) &mhi_sierra_em919x_info },
@@ -1196,6 +1301,15 @@ static void mhi_pci_write_reg(struct mhi_controller *mhi_cntrl,
 	writel(val, addr);
 }
 
+/* [crux 2026-10-20] 原厂 mhi_qcom.c 在 MHI_CB_EE_MISSION_MODE 时强制一次
+ * suspend/resume，让设备切到 mission mode 的 pcie phy 参数。
+ * mainline 缺这一步，导致模组真正运行后链路撑不住。
+ * 注意：必须同步执行 —— status_cb 之后紧接 mhi_uevent_notify 会触发
+ * client probe（通道 prepare），异步就永远拿不到空闲的 MHI。 crux_mission_sync
+ */
+static int mhi_pci_runtime_suspend(struct device *dev);
+static int mhi_pci_runtime_resume(struct device *dev);
+
 static void mhi_pci_status_cb(struct mhi_controller *mhi_cntrl,
 			      enum mhi_callback cb)
 {
@@ -1208,9 +1322,41 @@ static void mhi_pci_status_cb(struct mhi_controller *mhi_cntrl,
 		dev_warn(&pdev->dev, "firmware crashed (%u)\n", cb);
 		pm_runtime_forbid(&pdev->dev);
 		break;
-	case MHI_CB_EE_MISSION_MODE:
+	case MHI_CB_EE_MISSION_MODE: {
+		struct mhi_pci_device *mhi_pdev = dev_get_drvdata(&pdev->dev);
+		struct mhi_controller *mhi_cntrl = &mhi_pdev->mhi_cntrl;
+		const u32 delayms = 100;
+		int itr = DIV_ROUND_UP(mhi_cntrl->timeout_ms, delayms);
+		int ret;
+
+		/* [crux] 必须同步做：本回调返回后 mhi_uevent_notify 会立刻触发
+		 * client probe 去 prepare 通道，那时 MHI 就再没有空闲窗口了。
+		 * 原厂 mhi_force_suspend 也是 -EBUSY 时 100ms 重试直到不忙。
+		 */
+		pm_runtime_get(&pdev->dev);
+		dev_info(&pdev->dev,
+			 "[crux] mission mode: forcing suspend to switch PHY\n");
+		for (; itr; itr--) {
+			ret = mhi_pci_runtime_suspend(&pdev->dev);
+			if (!ret || ret != -EBUSY)
+				break;
+			dev_info(&pdev->dev,
+				 "[crux] mission mode: MHI busy, retry (%d)\n", itr);
+			msleep(delayms);
+		}
+		if (ret) {
+			dev_warn(&pdev->dev,
+				 "[crux] mission mode: force suspend failed %d\n", ret);
+		} else {
+			msleep(50);
+			ret = mhi_pci_runtime_resume(&pdev->dev);
+			dev_info(&pdev->dev,
+				 "[crux] mission mode: force resume %d\n", ret);
+		}
+		pm_runtime_put(&pdev->dev);
 		pm_runtime_allow(&pdev->dev);
 		break;
+	}
 	default:
 		break;
 	}
@@ -1456,6 +1602,9 @@ static int mhi_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 
 	dev_info(&pdev->dev, "MHI PCI device found: %s\n", info->name);
 
+	/* audit: endpoint enumerated while esoc says the module is not powered? */
+	crux_dep_require("x50_power", CRUX_DEP_UP, "mhi_pci_probe", false);
+
 	/* mhi_pdev.mhi_cntrl must be zero-initialized */
 	mhi_pdev = devm_kzalloc(&pdev->dev, sizeof(*mhi_pdev), GFP_KERNEL);
 	if (!mhi_pdev)
@@ -1594,6 +1743,41 @@ static void mhi_pci_shutdown(struct pci_dev *pdev)
 	mhi_pci_remove(pdev);
 	pci_set_power_state(pdev, PCI_D3hot);
 }
+
+/*
+ * crux: 外挂基带（SDX50M 等）掉电/复位前，必须先让 MHI 停链路。
+ * 否则链路在 MHI 还在跑的时候消失 -> AER 风暴 / Recovery failed(-11) /
+ * Root Port reset(-19)，严重时整机重启（已实测多次）。
+ * graceful 一律 false：设备可能已死，绝不等待其应答。
+ * keep_dev=true 只挂起 MHI、保留 mhi_dev（供之后 mhi_async_power_up 复用）。
+ */
+void mhi_pci_link_shutdown(struct pci_dev *pdev, bool keep_dev)
+{
+	struct mhi_pci_device *mhi_pdev = pci_get_drvdata(pdev);
+	struct mhi_controller *mhi_cntrl;
+
+	if (!mhi_pdev)
+		return;
+
+	mhi_cntrl = &mhi_pdev->mhi_cntrl;
+
+	if (!test_and_clear_bit(MHI_PCI_DEV_STARTED, &mhi_pdev->status))
+		return;
+
+	if (!pdev->is_virtfn)
+		timer_delete_sync(&mhi_pdev->health_check_timer);
+	cancel_work_sync(&mhi_pdev->recovery_work);
+
+	dev_info(&pdev->dev, "[crux] mhi link shutdown (keep_dev=%d)\n", keep_dev);
+
+	if (keep_dev) {
+		mhi_power_down_keep_dev(mhi_cntrl, false);
+	} else {
+		mhi_power_down(mhi_cntrl, false);
+		mhi_unprepare_after_power_down(mhi_cntrl);
+	}
+}
+EXPORT_SYMBOL_GPL(mhi_pci_link_shutdown);
 
 static void mhi_pci_reset_prepare(struct pci_dev *pdev)
 {

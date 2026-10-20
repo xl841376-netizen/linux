@@ -538,9 +538,9 @@
 	cs35l41: cs35l41@40 {
 		#sound-dai-cells = <1>;
 		compatible = "cirrus,cs35l41";
-		cs,cdc-reset-gpio = <&tlmm 89 0x01>;
+		/* [crux 2026-10-14] 删除 cs,cdc-reset-gpio：7.3 GPIO-SHARED 框架把结尾 -gpio 的属性也当 consumer，导致 gpio89 被当成 shared 独占，cs35l41 reset-gpios 永久 -EPROBE_DEFER */
 		reg = <0x40>;
-		pinctrl-names = "cs35l41_irq_default";
+		pinctrl-names = "default";
 		pinctrl-0 = <&cs35l41_int_default>;
 		interrupt-parent = <&tlmm>;
 		interrupts = <10 8>;

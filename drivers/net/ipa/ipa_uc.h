@@ -50,4 +50,10 @@ void ipa_uc_power(struct ipa *ipa);
  */
 void ipa_uc_panic_notifier(struct ipa *ipa);
 
+/* [crux 2026-10-19] 原厂 IPA_CPU_2_HW_CMD_REMOTE_IPA_INFO 移植 */
+int crux_ipa_uc_send_remote_ipa_info(u32 remote_addr, u32 mbox_n);
+u32 crux_ipa_uc_mbox_addr(u32 m, u32 n);
+int crux_ipa_gsi_set_mhi_base_chan(void);
+
+
 #endif /* _IPA_UC_H_ */

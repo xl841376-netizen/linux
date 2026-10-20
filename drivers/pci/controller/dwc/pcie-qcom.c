@@ -175,6 +175,12 @@
 /* PCI_EXP_SLTCAP register fields */
 #define PCIE_CAP_SLOT_POWER_LIMIT_VAL		FIELD_PREP(PCI_EXP_SLTCAP_SPLV, 250)
 #define PCIE_CAP_SLOT_POWER_LIMIT_SCALE		FIELD_PREP(PCI_EXP_SLTCAP_SPLS, 1)
+/* [crux] 原厂 pci-msm.c 的 Gen3 均衡预设寄存器 */
+#define GEN3_GEN2_CTRL		0x80c
+#define GEN3_EQ_CONTROL		0x8a8
+#define GEN3_MISC_CONTROL	0x8bc
+#define GEN3_SPCIE_CAP		0x154
+
 #define PCIE_CAP_SLOT_VAL			(PCI_EXP_SLTCAP_ABP | \
 						PCI_EXP_SLTCAP_PCP | \
 						PCI_EXP_SLTCAP_MRLSP | \
@@ -1295,9 +1301,27 @@ static int qcom_pcie_post_init_2_9_0(struct qcom_pcie *pcie)
 	writel(DEVICE_TYPE_RC, pcie->parf + PARF_DEVICE_TYPE);
 	writel(BYPASS | MSTR_AXI_CLK_EN | AHB_CLK_EN,
 		pcie->parf + PARF_MHI_CLOCK_RESET_CTRL);
-	writel(GEN3_RELATED_OFF_RXEQ_RGRDLESS_RXTS |
-		GEN3_RELATED_OFF_GEN3_ZRXDC_NONCOMPL,
+	/* [crux] 原厂语义：bit0 (ZRXDC_NONCOMPL) 要清 0，不是置 1 */
+	writel(GEN3_RELATED_OFF_RXEQ_RGRDLESS_RXTS,
 		pci->dbi_base + GEN3_RELATED_OFF);
+
+	/* [crux] Gen3 均衡预设：缺这三组写，EP 只能协商到 5GT/s
+	 * 对应原厂 pci-msm.c: msm_pcie_write_reg_field(GEN3_GEN2_CTRL, 0x1f00, 1)
+	 */
+	if (pci->max_link_speed >= 3) {
+		val = readl(pci->dbi_base + GEN3_GEN2_CTRL);
+		val = (val & ~0x1f00) | 0x1;
+		writel(val, pci->dbi_base + GEN3_GEN2_CTRL);
+
+		val = readl(pci->dbi_base + GEN3_EQ_CONTROL);
+		writel(val | 0x20, pci->dbi_base + GEN3_EQ_CONTROL);
+
+		val = readl(pci->dbi_base + GEN3_MISC_CONTROL);
+		writel(val | BIT(0), pci->dbi_base + GEN3_MISC_CONTROL);
+		writel(0x77777777, pci->dbi_base + GEN3_SPCIE_CAP);
+		val = readl(pci->dbi_base + GEN3_MISC_CONTROL);
+		writel(val & ~BIT(0), pci->dbi_base + GEN3_MISC_CONTROL);
+	}
 
 	writel(MST_WAKEUP_EN | SLV_WAKEUP_EN | MSTR_ACLK_CGC_DIS |
 		SLV_ACLK_CGC_DIS | CORE_CLK_CGC_DIS |

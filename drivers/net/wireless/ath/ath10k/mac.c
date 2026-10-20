@@ -4043,7 +4043,7 @@ static int ath10k_mac_tx_submit(struct ath10k *ar,
 	}
 
 	if (ret) {
-		ath10k_warn(ar, "failed to transmit packet, dropping: %d\n",
+		ath10k_dbg(ar, ATH10K_DBG_MAC, "failed to transmit packet, dropping: %d\n",
 			    ret);
 		ieee80211_free_txskb(ar->hw, skb);
 	}
@@ -4105,7 +4105,7 @@ static int ath10k_mac_tx(struct ath10k *ar,
 
 	ret = ath10k_mac_tx_submit(ar, txmode, txpath, skb);
 	if (ret) {
-		ath10k_warn(ar, "failed to submit frame: %d\n", ret);
+		ath10k_dbg(ar, ATH10K_DBG_MAC, "failed to submit frame: %d\n", ret);
 		return ret;
 	}
 
@@ -4456,7 +4456,7 @@ int ath10k_mac_tx_push_txq(struct ieee80211_hw *hw,
 
 	ret = ath10k_mac_tx(ar, vif, txmode, txpath, skb, false);
 	if (unlikely(ret)) {
-		ath10k_warn(ar, "failed to push frame: %d\n", ret);
+		ath10k_dbg(ar, ATH10K_DBG_MAC, "failed to push frame: %d\n", ret);
 
 		spin_lock_bh(&ar->htt.tx_lock);
 		ath10k_htt_tx_dec_pending(htt);
@@ -8168,7 +8168,7 @@ static void ath10k_reconfig_complete(struct ieee80211_hw *hw,
 	 * ATH10K_STATE_WEDGED
 	 */
 	if (ar->state == ATH10K_STATE_RESTARTED) {
-		ath10k_info(ar, "device successfully recovered\n");
+		ath10k_dbg(ar, ATH10K_DBG_MAC, "device successfully recovered\n");
 		ar->state = ATH10K_STATE_ON;
 		ieee80211_wake_queues(ar->hw);
 

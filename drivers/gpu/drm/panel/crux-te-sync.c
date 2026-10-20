@@ -45,7 +45,9 @@
 #define I_TEAR_VSYNC_SEL   0x280
 #define I_TEAR_CHECK_EN    0x284
 #define I_TEAR_SYNC_CFG    0x288
+/* [crux 2026-10-12] 官方语义（原厂 sde_hw_intf.c:630）：0x298 = [31:16] 读指针帧计数 | [15:0] 读指针当前行号 */
 #define I_TEAR_INT_COUNT   0x298
+#define I_TEAR_SYNC_CFG_HEIGHT 0x28c   /* 主线写入 vtotal*2，可反推 vtotal */
 #define I_TEAR_START_POS   0x2a0
 #define I_TEAR_RD_PTR_IRQ  0x2a4
 #define I_TEAR_OUT_LINE    0x2ac
@@ -78,6 +80,19 @@ struct crux_te {
     struct dentry *dbg;
     struct delayed_work work;
     unsigned long last_warn;   /* [crux2026-10-11] 异常上报节流用 */
+
+    /*
+     * [crux 2026-10-12] 速率统计：从 TEAR 读指针换算“面板实际帧率”。
+     * 0x298 低位是读指针当前行号，行推进速率 / vtotal 就是面板真实帧率；
+     * 这比看 TE 引脚靠谱（gpio8 被 DSI 以 mdp_vsync 持有，GPIO_IN 可能是盲的）。
+     */
+    spinlock_t rate_lock;
+    u64 lines_total;        /* 读指针累计推进的行数 */
+    u64 frames_total;       /* 读指针帧字段累计增量 */
+    u32 last_line, last_frame;
+    u32 vtotal;             /* 由 0x28C/2 得到 */
+    unsigned long long samples;
+    unsigned long last_move;/* 最近一次读指针推进 */
 };
 
 static struct crux_te *g_te;
@@ -174,6 +189,131 @@ static void crux_dump(struct crux_te *t)
         t->prev[i] = v[i];
 }
 
+/* [crux 2026-10-12] 高频采样 TEAR 读指针，累计推进量（用于算面板真实帧率） */
+static void crux_sample(struct crux_te *t)
+{
+    u32 v = rd(t->intf, I_TEAR_INT_COUNT);
+    u32 frame = v >> 16, line = v & 0xffff;
+    u32 vt = rd(t->intf, I_TEAR_SYNC_CFG_HEIGHT) >> 1;  /* 0x28C = vtotal*2 */
+    unsigned long flags;
+
+    spin_lock_irqsave(&t->rate_lock, flags);
+    if (t->samples) {
+        u32 dl = (line - t->last_line) & 0xffff;
+        u32 df = (frame - t->last_frame) & 0xffff;
+
+        if (dl > 0x8000)
+            dl = 0;                 /* 大幅回退视为回绕/复位，不计 */
+        if (df > 0x8000)
+            df = 0;
+        t->lines_total += dl;
+        t->frames_total += df;
+        if (dl || df)
+            t->last_move = jiffies;
+    }
+    t->last_line = line;
+    t->last_frame = frame;
+    t->vtotal = vt;
+    t->samples++;
+    spin_unlock_irqrestore(&t->rate_lock, flags);
+}
+
+/* [crux 2026-10-12] 在给定窗口内紧采样 gpio8 电平，返回边沿数（TE 脉冲数≈边沿/2） */
+static unsigned int crux_gpio_edges(struct crux_te *t, u64 window_ns, u32 *hi, u32 *lo)
+{
+    u64 start = ktime_get_ns();
+    unsigned int edges = 0;
+    u32 last = ioread32(t->tlmm + TLMM_GPIO8_IO) & BIT(CRUX_TE_GPIO_BIT);
+    u32 h = 0, l = 0, v;
+
+    while (ktime_get_ns() - start < window_ns) {
+        v = ioread32(t->tlmm + TLMM_GPIO8_IO) & BIT(CRUX_TE_GPIO_BIT);
+        if (v)
+            h++;
+        else
+            l++;
+        if (v != last) {
+            edges++;
+            last = v;
+        }
+    }
+    *hi = h;
+    *lo = l;
+    return edges;
+}
+
+/*
+ * /sys/kernel/debug/crux_te_sync/rate —— 一秒窗口的帧率实测
+ *   lines_advanced / line_rate  : TEAR 读指针推进的行数与行率
+ *   est_refresh                 : 行率 / vtotal = 面板实际帧率（最关键的读数）
+ *   frame_field_rate            : 0x298 高位帧字段的速率（供对照）
+ *   te_pin(100ms)               : gpio8 电平/边沿统计（边沿为 0 说明引脚看不到 TE）
+ */
+static ssize_t rate_read(struct file *f, char __user *u, size_t n, loff_t *o)
+{
+    struct crux_te *t = f->private_data;
+    char buf[768];
+    u64 ns, l1, l2, f1, f2, dlines, dframes;
+    u64 line_mhz, refresh_mhz, frame_mhz, te_mhz;
+    u32 vt, v, hi = 0, lo = 0, edges;
+    unsigned long long s1, s2;
+    unsigned long flags;
+    int len;
+
+    if (!t || !t->intf)
+        return -ENODEV;
+
+    spin_lock_irqsave(&t->rate_lock, flags);
+    l1 = t->lines_total; f1 = t->frames_total; s1 = t->samples; vt = t->vtotal;
+    spin_unlock_irqrestore(&t->rate_lock, flags);
+    ns = ktime_get_ns();
+
+    msleep(1000);
+
+    spin_lock_irqsave(&t->rate_lock, flags);
+    l2 = t->lines_total; f2 = t->frames_total; s2 = t->samples;
+    if (t->vtotal)
+        vt = t->vtotal;
+    spin_unlock_irqrestore(&t->rate_lock, flags);
+    ns = ktime_get_ns() - ns;
+
+    dlines = l2 - l1;
+    dframes = f2 - f1;
+
+    /* 内核不能碰浮点：统一用整数算，结果单位为 mHz（=Hz*1000） */
+    line_mhz = ns ? (dlines * 1000000000000ULL) / ns : 0;
+    refresh_mhz = vt ? line_mhz / vt : 0;
+    frame_mhz = ns ? (dframes * 1000000000000ULL) / ns : 0;
+
+    v = rd(t->intf, I_TEAR_INT_COUNT);
+    edges = crux_gpio_edges(t, 100ULL * NSEC_PER_MSEC, &hi, &lo);
+    te_mhz = (u64)edges * 5000ULL;   /* 100ms 内 边沿/2 个脉冲 -> Hz = edges*5 */
+
+    len = scnprintf(buf, sizeof(buf),
+        "window_ms=%llu samples=%llu->%llu\n"
+        "vtotal(from 0x28C/2)=%u\n"
+        "rd_ptr_now: frame=%u line=%u\n"
+        "lines_advanced=%llu  line_rate=%llu.%03llu Hz\n"
+        "est_refresh(line_rate/vtotal)=%llu.%03llu Hz\n"
+        "frame_field_rate=%llu.%03llu /s\n"
+        "te_pin(100ms): edges=%u hi=%u lo=%u  est_te_rate=%llu.%03llu Hz\n",
+        (unsigned long long)(ns / NSEC_PER_MSEC), s1, s2, vt,
+        v >> 16, v & 0xffff,
+        (unsigned long long)dlines,
+        (unsigned long long)(line_mhz / 1000), (unsigned long long)(line_mhz % 1000),
+        (unsigned long long)(refresh_mhz / 1000), (unsigned long long)(refresh_mhz % 1000),
+        (unsigned long long)(frame_mhz / 1000), (unsigned long long)(frame_mhz % 1000),
+        edges, hi, lo,
+        (unsigned long long)(te_mhz / 1000), (unsigned long long)(te_mhz % 1000));
+
+    return simple_read_from_buffer(u, n, o, buf, len);
+}
+
+static const struct file_operations rate_fops = {
+    .read = rate_read,
+    .open = simple_open,
+};
+
 static ssize_t stats_read(struct file *f, char __user *u, size_t n, loff_t *o)
 {
     struct crux_te *t = f->private_data;
@@ -185,11 +325,15 @@ static ssize_t stats_read(struct file *f, char __user *u, size_t n, loff_t *o)
 
     len = scnprintf(buf, sizeof(buf),
         "intf1@%08lx dsi0@%08lx\n"
+        "sync_cfg_height=%08x (vtotal=%u)\n"
+        "rd_ptr: frame=%u line=%u  [0x298 官方语义]\n"
         "tear_check_en=%08x sync_cfg=%08x int_cnt=%08x line_cnt=%08x out_line=%08x\n"
         "intf_line_cnt=%08x frame_cnt=%08x timing_en=%08x cfg=%08x cfg2=%08x\n"
         "dsi_ctrl=%08x cmd_cfg0=%08x mdp_ctrl2=%08x err_mask0=%08x\n"\
         "tlmm_gpio8_ctl=%08x tlmm_gpio8_io=%08x\n",
         CRUX_INTF1_PHYS, CRUX_DSI0_PHYS,
+        rd(t->intf, I_TEAR_SYNC_CFG_HEIGHT), rd(t->intf, I_TEAR_SYNC_CFG_HEIGHT) >> 1,
+        rd(t->intf, I_TEAR_INT_COUNT) >> 16, rd(t->intf, I_TEAR_INT_COUNT) & 0xffff,
         rd(t->intf, I_TEAR_CHECK_EN), rd(t->intf, I_TEAR_SYNC_CFG),
         rd(t->intf, I_TEAR_INT_COUNT), rd(t->intf, I_TEAR_LINE_COUNT),
         rd(t->intf, I_TEAR_OUT_LINE),
@@ -332,8 +476,11 @@ static void crux_te_work(struct work_struct *w)
 {
     struct crux_te *t = container_of(to_delayed_work(w), struct crux_te, work);
 
-    crux_dump(t);
-    schedule_delayed_work(&t->work, msecs_to_jiffies(2000));
+    /* [crux 2026-10-12] 20ms 一次采样（算行率），每 100 次（2s）再做一次变更检测 */
+    crux_sample(t);
+    if ((t->samples % 100) == 0)
+        crux_dump(t);
+    schedule_delayed_work(&t->work, msecs_to_jiffies(20));
 }
 
 static int crux_te_probe(struct platform_device *pdev)
@@ -359,8 +506,11 @@ static int crux_te_probe(struct platform_device *pdev)
     platform_set_drvdata(pdev, t);
     g_te = t;
 
+    spin_lock_init(&t->rate_lock);
+
     t->dbg = debugfs_create_dir("crux_te_sync", NULL);
     debugfs_create_file("stats", 0444, t->dbg, t, &stats_fops);
+    debugfs_create_file("rate", 0444, t->dbg, t, &rate_fops);
     debugfs_create_file("te_pin", 0444, t->dbg, t, &te_pin_fops);
     debugfs_create_file("muxgpio", 0200, t->dbg, t, &crux_mux_fops);
     debugfs_create_file("gop", 0444, t->dbg, t, &gop_fops);

@@ -1308,6 +1308,15 @@ static int q6asm_dai_probe(struct platform_device *pdev)
 	if (!pdata)
 		return -ENOMEM;
 
+	/* [crux 2026-10-20] 6.17 已验证的第二处修复：
+	 * 不限制时 arm-smmu 会分到 IOVA=0xfff80000，落在原厂音频 IOVA 窗口
+	 * [0x10000000, 0x1fffffff] 之外，DSP 的 ASM 直接回 ADSP_EFAILED(1)
+	 * -> Memory_map_regions failed -> hw_params -ENOMEM（表现为无声）。
+	 * 限制到 29bit 后 IOVA 落回该窗口。
+	 */
+	dev->coherent_dma_mask = DMA_BIT_MASK(29);
+	dev->dma_mask = &dev->coherent_dma_mask;
+
 	rc = of_parse_phandle_with_fixed_args(node, "iommus", 1, 0, &args);
 	if (rc < 0)
 		pdata->sid = -1;

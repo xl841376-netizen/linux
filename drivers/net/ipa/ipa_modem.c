@@ -318,6 +318,9 @@ int ipa_modem_start(struct ipa *ipa)
 	struct ipa_priv *priv;
 	int ret;
 
+	dev_info(ipa->dev, "[crux modem] ipa_modem_start called, state=%d\n",
+		 atomic_read(&ipa->modem_state));
+
 	/* Only attempt to start the modem if it's stopped */
 	state = atomic_cmpxchg(&ipa->modem_state, IPA_MODEM_STATE_STOPPED,
 			       IPA_MODEM_STATE_STARTING);
@@ -353,6 +356,8 @@ int ipa_modem_start(struct ipa *ipa)
 
 		free_netdev(netdev);
 	}
+
+	dev_info(ipa->dev, "[crux modem] ipa_modem_start done: ret=%d\n", ret);
 
 out_set_state:
 	if (ret)

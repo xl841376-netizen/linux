@@ -21,3 +21,12 @@ config QCOM_IPA
 	  of QCOM_Q6V5_COMMON (Y or M).
 
 	  If unsure, say N.
+
+config IPA_MHI_PROXY
+	tristate "IPA-MHI proxy (external modem to modem path)"
+	depends on QCOM_IPA
+	depends on MHI_BUS
+	help
+	  Support the IPA-MHI proxy, which lets the internal modem drive the
+	  MHI channels of an external modem through the IPA hardware proxy
+	  doorbells.  Needed for the SDX50M ("X50") 5G companion on crux.

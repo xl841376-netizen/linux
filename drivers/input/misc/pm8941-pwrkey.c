@@ -522,8 +522,14 @@ void crux_pon_force_type(bool shutdown)
 
 	usleep_range(100, 1000);
 
+	/*
+	 * [crux 2026-10-19] type 必须写进 enable 所在的同一个寄存器：
+	 * PMIC revision 0 用 RST_CTL(0x5a)，revision>=1 用 RST_CTL2(0x5b)。
+	 * 原来固定写 RST_CTL，在 SM8150（PM8150, rev>=1）上等于没改类型，
+	 * 于是拉低 PS_HOLD 仍然走 hard reset —— 关机变成重启。
+	 */
 	error = regmap_update_bits(pwrkey->regmap,
-				   pwrkey->baseaddr + PON_PS_HOLD_RST_CTL,
+				   pwrkey->baseaddr + enable_reg,
 				   PON_PS_HOLD_TYPE_MASK, reset_type);
 	if (error)
 		dev_err(pwrkey->dev, "[crux] pon-force set type: %d\n", error);
@@ -536,7 +542,7 @@ void crux_pon_force_type(bool shutdown)
 			error);
 
 	if (!regmap_read(pwrkey->regmap,
-			 pwrkey->baseaddr + PON_PS_HOLD_RST_CTL, &rd))
+			 pwrkey->baseaddr + enable_reg, &rd))
 		crux_shutdown_report("pon-force",
 				     "RST_CTL=0x%02x type=%u want=%u %s",
 				     rd, rd & PON_PS_HOLD_TYPE_MASK,

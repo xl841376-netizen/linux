@@ -29,7 +29,7 @@
 		VA-supply = <&cs35l41_vreg>;
 		VP-supply = <&cs35l41_vreg>;
 		reset-gpios = <&tlmm 89 GPIO_ACTIVE_HIGH>;
-		cs,cdc-reset-gpio = <&tlmm 89 0x01>;
+		/* [crux 2026-10-14] 删除 cs,cdc-reset-gpio：7.3 GPIO-SHARED 框架把结尾 -gpio 的属性也当 consumer，导致 gpio89 被当成 shared 独占，cs35l41 reset-gpios 永久 -EPROBE_DEFER */
 		reg = <0x40>;
 		pinctrl-names = "default";
 		pinctrl-0 = <&cs35l41_int_default>;
@@ -40,10 +40,11 @@
 		cirrus,boost-peak-milliamp = <4000>;
 		cirrus,boost-ind-nanohenry = <1000>;
 		cirrus,boost-cap-microfarad = <15>;
-		cirrus,gpio-config2 {
-			cirrus,gpio-src-select = <0x4>;
-			cirrus,gpio-output-enable;
-		};
+		/* [crux 2026-10-14] 下游 cirrus,gpio-config2 子节点改为主线形式。
+		 * bindings: cirrus,cs35l41.yaml；主线驱动读 cirrus,gpio2-src-select / cirrus,gpio2-output-enable
+		 * 4 = Push-pull INTB (active low) */
+		cirrus,gpio2-src-select = <4>;
+		cirrus,gpio2-output-enable;
 	};
 };
 

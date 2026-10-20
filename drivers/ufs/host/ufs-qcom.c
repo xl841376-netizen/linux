@@ -1408,7 +1408,13 @@ static void ufs_qcom_set_caps(struct ufs_hba *hba)
 {
 	struct ufs_qcom_host *host = ufshcd_get_variant(hba);
 
-	hba->caps |= UFSHCD_CAP_CLK_GATING | UFSHCD_CAP_HIBERN8_WITH_CLK_GATING;
+	/*
+	 * crux/sm8150: keep clock gating but do NOT allow HIBERN8 while clocks are
+	 * gated. On this board DME_HIBER_EXIT (pwr ctrl cmd 0x18) times out when
+	 * the PHY PLL has to relock after the clocks were gated in H8, which
+	 * escalates into an RCU stall. See commaai/vamOS issue #83.
+	 */
+	hba->caps |= UFSHCD_CAP_CLK_GATING;
 	hba->caps |= UFSHCD_CAP_CLK_SCALING | UFSHCD_CAP_WB_WITH_CLK_SCALING;
 	hba->caps |= UFSHCD_CAP_AUTO_BKOPS_SUSPEND;
 	hba->caps |= UFSHCD_CAP_WB_EN;

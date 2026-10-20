@@ -327,3 +327,12 @@ config QCOM_UBWC_CONFIG
 	  (UBWC) engines across various IP blocks, which need to be initialized
 	  with coherent configuration data. This module functions as a single
 	  source of truth for that information.
+
+config CRUX_DEP
+	bool "Crux provider/consumer state contract"
+	depends on ARCH_QCOM
+	help
+	  Tiny registry where a driver publishes its operational state and
+	  consumers query it before touching shared hardware.  A consumer that
+	  proceeds while the provider is not in the expected state logs a
+	  ratelimited warning instead of silently taking a default path.

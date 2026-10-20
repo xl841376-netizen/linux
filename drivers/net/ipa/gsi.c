@@ -584,6 +584,21 @@ static int gsi_channel_start_command(struct gsi_channel *channel)
 	enum gsi_channel_state state;
 
 	state = gsi_channel_state(channel);
+
+	/*
+	 * [crux 2026-10-15] A modem watchdog crash leaves the channels
+	 * STARTED on the GSI side, while IPA's runtime resume path still
+	 * believes they are stopped and tries to resume them. Resuming an
+	 * already-started channel is a no-op, so treat STARTED as success
+	 * here instead of failing with -EINVAL -- that failure wedges the
+	 * command channel and the modem QMI handshake never completes.
+	 */
+	if (state == GSI_CHANNEL_STATE_STARTED) {
+		dev_info(dev, "channel %u already STARTED (modem recovery)\n",
+			 gsi_channel_id(channel));
+		return 0;
+	}
+
 	if (state != GSI_CHANNEL_STATE_ALLOCATED &&
 	    state != GSI_CHANNEL_STATE_STOPPED) {
 		dev_err(dev, "channel %u bad state %u before start\n",
@@ -2063,6 +2078,7 @@ static int gsi_ring_setup(struct gsi *gsi)
 }
 
 /* Setup function for GSI.  GSI firmware must be loaded and initialized */
+
 int gsi_setup(struct gsi *gsi)
 {
 	const struct reg *reg;

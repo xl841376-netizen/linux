@@ -82,6 +82,7 @@
 
 &i2c4 {
 	fsa4480@42 {
+		reg = <0x42>;
 		status = "disabled";
 	};
 };

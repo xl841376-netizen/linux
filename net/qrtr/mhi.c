@@ -32,6 +32,22 @@ static void qcom_mhi_qrtr_dl_callback(struct mhi_device *mhi_dev,
 		return;
 	}
 
+	{
+		static atomic_t dbg_cnt = ATOMIC_INIT(0);
+		if (atomic_inc_return(&dbg_cnt) <= 200) {
+			const unsigned char *p = mhi_res->buf_addr;
+			unsigned int l = mhi_res->bytes_xferd;
+			dev_info(qdev->dev,
+				 "crux-rxdump #%d len=%u hdr=%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x\n",
+				 atomic_read(&dbg_cnt), l,
+				 l > 0 ? p[0] : 0, l > 1 ? p[1] : 0,
+				 l > 2 ? p[2] : 0, l > 3 ? p[3] : 0,
+				 l > 4 ? p[4] : 0, l > 5 ? p[5] : 0,
+				 l > 6 ? p[6] : 0, l > 7 ? p[7] : 0,
+				 l > 8 ? p[8] : 0, l > 9 ? p[9] : 0,
+				 l > 10 ? p[10] : 0, l > 11 ? p[11] : 0);
+		}
+	}
 	rc = qrtr_endpoint_post(&qdev->ep, mhi_res->buf_addr,
 				mhi_res->bytes_xferd);
 	if (rc == -EINVAL)

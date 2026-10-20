@@ -14,6 +14,8 @@
 #include <linux/iommu.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
+#include <linux/namei.h>
+#include <linux/property.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
 #include <linux/of_platform.h>
@@ -81,6 +83,7 @@ struct qcom_pas {
 	struct device *proxy_pds[3];
 
 	int proxy_pd_count;
+	bool crux_hold_proxy_pds;
 
 	const char *dtb_firmware_name;
 	int pas_id;
@@ -398,7 +401,16 @@ static void qcom_pas_handover(struct qcom_q6v5 *q6v5)
 		regulator_disable(pas->cx_supply);
 	clk_disable_unprepare(pas->aggre2_clk);
 	clk_disable_unprepare(pas->xo);
-	qcom_pas_pds_disable(pas, pas->proxy_pds, pas->proxy_pd_count);
+	/* [crux] 模组(MPSS, pas_id==4) handover 后继续持有 cx/mss 代理投票，
+	 * 等价 CAF pil_mss_make_proxy_votes；否则 modem 运行期失去 vdd_cx/vdd_mx
+	 * 投票，RF/QLink 链路会建链失败。投票在 stop 时释放。
+	 */
+	if (pas->pas_id == 4) {
+		pas->crux_hold_proxy_pds = true;
+		dev_info(pas->dev, "crux: keep proxy pd votes after handover (modem)\n");
+	} else {
+		qcom_pas_pds_disable(pas, pas->proxy_pds, pas->proxy_pd_count);
+	}
 }
 
 static int qcom_pas_stop(struct rproc *rproc)
@@ -435,6 +447,12 @@ static int qcom_pas_stop(struct rproc *rproc)
 	handover = qcom_q6v5_unprepare(&pas->q6v5);
 	if (handover)
 		qcom_pas_handover(&pas->q6v5);
+
+	if (pas->crux_hold_proxy_pds) {
+		qcom_pas_pds_disable(pas, pas->proxy_pds, pas->proxy_pd_count);
+		pas->crux_hold_proxy_pds = false;
+		dev_info(pas->dev, "crux: released proxy pd votes (modem stop)\n");
+	}
 
 	if (pas->smem_host_id)
 		ret = qcom_smem_bust_hwspin_lock_by_host(pas->smem_host_id);
@@ -818,6 +836,43 @@ static void qcom_pas_unassign_memory_region(struct qcom_pas *pas)
 	}
 }
 
+
+/*
+ * [crux] 运行前依赖检查
+ *
+ * DT: qcom,check-fw = "qcom/sm8150/xiaomi/crux/modem.mbn";
+ *
+ * 用固件加载器本身去试（request_firmware_direct）：加载得到说明
+ * 文件系统已就绪、固件在；加载不到就返回 -EPROBE_DEFER 等下次重试。
+ * 不用 kern_path：延迟重试跑在 kworker 上，没有 fs 上下文，路径解析不可靠。
+ */
+static int qcom_pas_check_fw(struct device *dev)
+{
+	struct property *prop;
+	const char *name;
+	bool missing = false;
+
+	of_property_for_each_string(dev->of_node, "qcom,check-fw", prop, name) {
+		const struct firmware *fw;
+		int ret;
+
+		ret = request_firmware_direct(&fw, name, dev);
+		if (ret) {
+			dev_info(dev, "依赖未就绪: %s (%d) -> 推迟加载\n", name, ret);
+			missing = true;
+		} else {
+			release_firmware(fw);
+		}
+	}
+
+	return missing ? -EPROBE_DEFER : 0;
+}
+
+static int qcom_pas_check_deps(struct device *dev)
+{
+	return qcom_pas_check_fw(dev);
+}
+
 static int qcom_pas_probe(struct platform_device *pdev)
 {
 	const struct qcom_pas_data *desc;
@@ -831,6 +886,11 @@ static int qcom_pas_probe(struct platform_device *pdev)
 	desc = of_device_get_match_data(&pdev->dev);
 	if (!desc)
 		return -EINVAL;
+
+	/* [crux] 运行前依赖检查：DT 里 qcom,check-path 列出的路径必须全部存在 */
+	ret = qcom_pas_check_deps(&pdev->dev);
+	if (ret)
+		return ret;
 
 	if (!qcom_pas_is_available())
 		return -EPROBE_DEFER;
@@ -861,6 +921,14 @@ static int qcom_pas_probe(struct platform_device *pdev)
 
 	rproc->has_iommu = of_property_present(pdev->dev.of_node, "iommus");
 	rproc->auto_boot = desc->auto_boot;
+	/* [crux 2026-10-17] 允许 DT 关掉自动启动：外挂/内建 modem 需要等
+	 * rmtfs、partition、pd-mapper 等文件系统服务就绪后再 start，
+	 * 否则取不到 EFS（modemst1/2）就会启动即崩，SSR 还可能把 AP 一起带死。
+	 * 由用户态 echo start > /sys/class/remoteproc/remoteprocN/state 启动。
+	 */
+	if (of_property_read_bool(pdev->dev.of_node, "qcom,no-auto-boot"))
+		rproc->auto_boot = false;
+
 	rproc_coredump_set_elf_info(rproc, ELFCLASS32, EM_NONE);
 
 	pas = rproc->priv;

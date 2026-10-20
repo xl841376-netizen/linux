@@ -1,3 +1,4 @@
+obj-$(CONFIG_CRUX_DEP)		+= crux_dep.o
 # SPDX-License-Identifier: GPL-2.0
 CFLAGS_rpmh-rsc.o := -I$(src)
 CFLAGS_qcom_aoss.o := -I$(src)

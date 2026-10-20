@@ -7,6 +7,7 @@
 #include <linux/if_arp.h>
 #include <linux/mhi.h>
 #include <linux/module.h>
+#include <linux/crux_dep.h>
 #include <linux/netdevice.h>
 #include <linux/skbuff.h>
 #include <linux/u64_stats_sync.h>
@@ -74,6 +75,17 @@ static netdev_tx_t mhi_ndo_xmit(struct sk_buff *skb, struct net_device *ndev)
 	struct mhi_net_dev *mhi_netdev = netdev_priv(ndev);
 	struct mhi_device *mdev = mhi_netdev->mdev;
 	int err;
+
+	/*
+	 * Only hand frames to the modem once its MHI side reached mission
+	 * mode.  Queueing while the EE is still SBL/EDL keeps the TX ring
+	 * busy with frames nobody will read, which previously collided with
+	 * the Sahara recovery path.
+	 */
+	if (!crux_dep_require("x50_ee", CRUX_DEP_UP, ndev->name, true)) {
+		dev_kfree_skb_any(skb);
+		goto exit_drop;
+	}
 
 	err = mhi_queue_skb(mdev, DMA_TO_DEVICE, skb, skb->len, MHI_EOT);
 	if (unlikely(err)) {

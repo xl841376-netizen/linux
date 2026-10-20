@@ -866,29 +866,21 @@
 		compatible = "qcom,pm8009-rpmh-regulators";
 		qcom,pmic-id = "f";
 
+		/*
+		 * [crux] 2026-10-12：cmd-db（这台机器实际的资源表，148 条）里**没有 f 系列**
+		 * （PM8009）的任何 LDO，所以内核 probe 时报
+		 *   regulators-2: ldo2: could not find RPMh address for resource ldof2
+		 * 这三路 LDO 不经 RPMh 控制。原来照主线抄的节点先删掉，避免误报；
+		 * 将来若真要控制它们，应走 SPMI 直控（spmi-regulator），不要写 rpmh 资源名。
+		 */
 		vdd-s1-supply = <&vph_pwr>;
 		vdd-s2-supply = <&vreg_bob>;
 
 		vdd-l2-supply = <&vreg_s8c_1p3>;
 		vdd-l5-l6-supply = <&vreg_bob>;
 
-		vreg_l2f_1p2: ldo2 {
-			regulator-min-microvolt = <1200000>;
-			regulator-max-microvolt = <1200000>;
-			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
-		};
 
-		vreg_l5f_2p85: ldo5 {
-			regulator-min-microvolt = <2800000>;
-			regulator-max-microvolt = <2800000>;
-			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
-		};
 
-		vreg_l6f_2p85: ldo6 {
-			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
-			regulator-min-microvolt = <2856000>;
-			regulator-max-microvolt = <2856000>;
-		};
 	};
 };
 
@@ -898,6 +890,15 @@
 
 &gpu {
 	status = "okay";
+
+	/* [crux 2026-10-18] 对齐原厂 sm8150-gpu.dtsi:144：
+	 * vddcx = gpu_cx_gdsc、vdd = gpu_gx_gdsc（gpucc 的两个 GDSC）。
+	 * a6xx_gmu 用名字取域（"cx"/"gx"），取不到就 tolerated 成 NULL，
+	 * 于是电源域从不开、regulator 走 dummy，GPU 一上电就 fault。
+	 */
+	power-domains = <&gpucc GPU_CX_GDSC>,
+			<&gpucc GPU_GX_GDSC>;
+	power-domain-names = "cx", "gx";
 };
 
 &gpu_zap_shader {
@@ -1086,34 +1087,49 @@
 		      <0x0 0xc0000000 0x0 0xc0000000>;
 	};
 
-	/* IPA（7.3 的 sm8150.dtsi 没有 SM8150 的 IPA 节点） */
-	soc {
-		ipa: ipa@1e40000 {
-			compatible = "qcom,sm8150-ipa";
-			iommus = <&apps_smmu 0x520 0x0>,
-				 <&apps_smmu 0x521 0x0>,
-				 <&apps_smmu 0x522 0x0>;
-			reg = <0 0x01e40000 0 0x7000>,
-			      <0 0x01e47000 0 0x2800>,
-			      <0 0x01e04000 0 0x28000>;
-			reg-names = "ipa-reg", "ipa-shared", "gsi";
-			interrupts-extended = <&intc GIC_SPI 311 IRQ_TYPE_EDGE_RISING>,
-					      <&intc GIC_SPI 432 IRQ_TYPE_LEVEL_HIGH>,
-					      <&ipa_smp2p_in 0 IRQ_TYPE_EDGE_RISING>,
-					      <&ipa_smp2p_in 1 IRQ_TYPE_EDGE_RISING>;
-			interrupt-names = "ipa", "gsi", "ipa-clock-query", "ipa-setup-ready";
-			clocks = <&rpmhcc RPMH_IPA_CLK>;
-			clock-names = "core";
-			interconnects = <&aggre2_noc MASTER_IPA 0 &mc_virt SLAVE_EBI_CH0 0>,
-					<&aggre2_noc MASTER_IPA 0 &system_noc SLAVE_OCIMEM 0>,
-					<&gem_noc MASTER_AMPSS_M0 0 &config_noc SLAVE_IPA_CFG 0>;
-			interconnect-names = "memory", "imem", "config";
-			qcom,smem-states = <&ipa_smp2p_out 0>, <&ipa_smp2p_out 1>;
-			qcom,smem-state-names = "ipa-clock-enabled-valid", "ipa-clock-enabled";
-			status = "disabled";
-		};
-	};
+
 };
+/* [crux 2026-10-14] IPA 挂到真正的 soc@0 下（原来写成 /{ soc {} } 建了个空壳节点，
+ *               子节点不会被 populate 成平台设备），改用 label 引用。 */
+&soc {
+
+	ipa: ipa@1e40000 {
+		compatible = "qcom,sm8150-ipa";
+		#address-cells = <1>;
+		#size-cells = <1>;
+		iommus = <&apps_smmu 0x520 0x0>,
+			 <&apps_smmu 0x522 0x0>;
+		reg = <0 0x01e40000 0 0x7000>,
+		      <0 0x01e47000 0 0x4000>,
+		      <0 0x01e04000 0 0x2c000>;
+		reg-names = "ipa-reg", "ipa-shared", "gsi";
+		interrupts-extended = <&intc GIC_SPI 311 IRQ_TYPE_EDGE_RISING>,
+				      <&intc GIC_SPI 432 IRQ_TYPE_LEVEL_HIGH>,
+				      <&ipa_smp2p_in 0 IRQ_TYPE_EDGE_RISING>,
+				      <&ipa_smp2p_in 1 IRQ_TYPE_EDGE_RISING>;
+		interrupt-names = "ipa", "gsi", "ipa-clock-query", "ipa-setup-ready";
+		clocks = <&rpmhcc RPMH_IPA_CLK>;
+		clock-names = "core";
+
+		qcom,qmp = <&aoss_qmp>;
+		interconnects = <&aggre2_noc MASTER_IPA 0 &mc_virt SLAVE_EBI_CH0 0>,
+				<&aggre2_noc MASTER_IPA 0 &system_noc SLAVE_OCIMEM 0>,
+				<&gem_noc MASTER_AMPSS_M0 0 &config_noc SLAVE_IPA_CFG 0>;
+		interconnect-names = "memory", "imem", "config";
+		qcom,smem-states = <&ipa_smp2p_out 0>, <&ipa_smp2p_out 1>;
+		qcom,smem-state-names = "ipa-clock-enabled-valid", "ipa-clock-enabled";
+		/* [crux 2026-10-14] 用户要求启用 IPA（主线暂无 qcom,sm8150-ipa 数据表，启用后设备会创建但驱动不会绑定） */
+
+		/* [crux 2026-10-15] IPA 固件区（原厂 pil_ipa_fw_region 0x98f00000/0x10000，与本机 ipa_fw_mem 一致） */
+		memory-region = <&ipa_fw_mem>;
+		/* AP 侧自己加载 GSI 固件（原厂 modem 不主动拉起握手） */
+		qcom,gsi-loader = "self";
+		firmware-name = "qcom/sm8150/xiaomi/crux/ipa_fws.mbn";
+		status = "okay";
+	};
+	
+};
+
 
 /* IPA 的两条 smp2p 通道（主线 dtsi 里没有） */
 &{/smp2p-mpss} {
@@ -1164,6 +1180,11 @@
 		    <&crux_ap2mdm_active>, <&crux_mdm2ap_active>;
 
 	max-link-speed = <3>;
+
+	/* [crux 2026-10-18] 对齐原厂 gdsc-vdd-supply = <&pcie_1_gdsc>：
+	 * 主线等价写法是 GCC 的 PCIE_1_GDSC 电源域。
+	 */
+	power-domains = <&gcc PCIE_1_GDSC>;
 
 	/* 链路一直停在 L0，避免读写踩空（6.17 验证过的稳定档位） */
 	qcom,no-l0s-supported;
@@ -1542,7 +1563,7 @@
 /* ===== [crux] 音频（照 6.17 合入）===== */
 &sound {
 	compatible = "qcom,sm8150-sndcard";
-	model = "Xiaomi Mi9 Pro";
+	model = "Xiaomi Mi9 Pro5G sm8150";
 	pinctrl-0 = <&quat_mi2s_active &quat_mi2s_sd0_active>;
 	pinctrl-names = "default";
 
@@ -1615,7 +1636,10 @@
 			sound-dai = <&q6routing>;
 		};
 		codec {
-			sound-dai = <&dummy_codec>;
+			/* [crux 2026-10-20] 6.17 出声时的写法：cs35l41 必须在链路里，
+			 * 否则它的 DAI 不会被 startup/hw_params 配置，功放不出声。
+			 */
+			sound-dai = <&cs35l41 0>;
 		};
 	};
 };
@@ -1743,9 +1767,7 @@
 		sink-pdos = <PDO_FIXED(5000, 3000,
 				       PDO_FIXED_DUAL_ROLE |
 				       PDO_FIXED_USB_COMM |
-				       PDO_FIXED_DATA_SWAP)
-			     PDO_FIXED(9000, 3000, 0)
-			     PDO_PPS_APDO(3300, 21000, 3000)>;
+				       PDO_FIXED_DATA_SWAP)>;
 
 		op-sink-microwatt = <20000000>;
 
@@ -2131,4 +2153,40 @@
  * ============================================================================ */
 &i2c4 {
 	status = "okay";
+};
+
+/* [crux 2026-10-17] modem 不自动启动：等 rmtfs/分区/pd-mapper 就绪后
+ * 由 modem-start.service 通过 sysfs 启动（否则拿不到 EFS -> 启动即崩）。
+ */
+&remoteproc_mpss {
+	qcom,no-auto-boot;
+};
+
+/* ============================================================================
+ * [crux 2026-10-17] 驱动运行前依赖检查（qcom_q6v5_pas: qcom_pas_check_fw）
+ * 固件加载器能取到 -> 文件系统已就绪 -> 才 probe；否则 -EPROBE_DEFER 等重试。
+ * 注意：不要用 /dev/disk/... 这类路径（延迟重试在 kworker 里无 fs 上下文，
+ * kern_path 不可靠）；分区/rmtfs 的就绪由用户态 qcom-subsys-start 保障。
+ * ============================================================================ */
+&remoteproc_mpss {
+	qcom,check-fw = "qcom/sm8150/xiaomi/crux/modem.mbn";
+};
+
+&remoteproc_cdsp {
+	qcom,check-fw = "qcom/sm8150/xiaomi/crux/cdsp.mbn";
+};
+
+&remoteproc_slpi {
+	qcom,check-fw = "qcom/sm8150/xiaomi/crux/slpi.mbn";
+};
+
+/* [crux 2026-10-17] PM8150B SMB5 充电器探针（mainline 没有 qpnp-smb5 驱动，
+ * qcom-battmgr 走 PMIC-GLINK/AOP 在 sm8150 上未通，导致插电不充）。
+ * 驱动：drivers/power/supply/crux_smb5.c（只读探针，可选 enable_charging）。
+ */
+&{/soc@0/spmi@c440000/pmic@2} {
+	crux_smb5: charger@1000 {
+		compatible = "crux,smb5";
+		reg = <0x1000>;
+	};
 };

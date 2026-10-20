@@ -441,6 +441,104 @@ static void qrtr_node_assign(struct qrtr_node *node, unsigned int nid)
 	spin_unlock_irqrestore(&qrtr_nodes_lock, flags);
 }
 
+/* ---- [crux] 跨节点转发（原厂 qrtr_fwd_ctrl_pkt/qrtr_fwd_pkt 的等价物） ----
+ *
+ * 原厂在 qrtr_node_rx_work（kthread work）里做转发，我们主线把收包放在
+ * qrtr_endpoint_post 里，而它会在 SMD/MHI 的回调（atomic）上下文被调用，
+ * 所以这里只把 skb 挂到队列，真正的 lookup/enqueue 放到 workqueue。
+ */
+struct qrtr_fwd_item {
+	struct list_head node;
+	struct sk_buff *skb;
+	u32 src_node, src_port, dst_node, dst_port;
+	int type;
+	bool bcast;
+};
+
+static DEFINE_SPINLOCK(qrtr_fwd_lock);
+static LIST_HEAD(qrtr_fwd_list);
+static void qrtr_fwd_work_fn(struct work_struct *work);
+static DECLARE_WORK(qrtr_fwd_work, qrtr_fwd_work_fn);
+
+static void qrtr_fwd_queue(struct sk_buff *skb, int type, bool bcast,
+			   u32 src_node, u32 src_port,
+			   u32 dst_node, u32 dst_port)
+{
+	struct qrtr_fwd_item *it;
+	struct sk_buff *cl = skb_clone(skb, GFP_ATOMIC);
+
+	if (!cl)
+		return;
+	it = kmalloc(sizeof(*it), GFP_ATOMIC);
+	if (!it) {
+		kfree_skb(cl);
+		return;
+	}
+	it->skb = cl;
+	it->type = type;
+	it->bcast = bcast;
+	it->src_node = src_node;
+	it->src_port = src_port;
+	it->dst_node = dst_node;
+	it->dst_port = dst_port;
+
+	spin_lock(&qrtr_fwd_lock);
+	list_add_tail(&it->node, &qrtr_fwd_list);
+	spin_unlock(&qrtr_fwd_lock);
+	schedule_work(&qrtr_fwd_work);
+}
+
+static void qrtr_fwd_work_fn(struct work_struct *work)
+{
+	LIST_HEAD(local);
+	struct qrtr_fwd_item *it, *tmp;
+	unsigned long flags;
+
+	spin_lock_irqsave(&qrtr_fwd_lock, flags);
+	list_splice_init(&qrtr_fwd_list, &local);
+	spin_unlock_irqrestore(&qrtr_fwd_lock, flags);
+
+	list_for_each_entry_safe(it, tmp, &local, node) {
+		struct sockaddr_qrtr from = {AF_QIPCRTR, it->src_node,
+					     it->src_port};
+
+		if (it->bcast) {
+			struct qrtr_node *n;
+
+			mutex_lock(&qrtr_node_lock);
+			list_for_each_entry(n, &qrtr_all_nodes, item) {
+				struct sockaddr_qrtr to = {AF_QIPCRTR, n->nid,
+							   QRTR_PORT_CTRL};
+				struct sk_buff *cl;
+
+				if (n->nid == QRTR_EP_NID_AUTO ||
+				    n->nid == it->src_node)
+					continue;
+				cl = skb_clone(it->skb, GFP_KERNEL);
+				if (!cl)
+					break;
+				qrtr_node_enqueue(n, cl, it->type, &from, &to);
+			}
+			mutex_unlock(&qrtr_node_lock);
+		} else {
+			struct sockaddr_qrtr to = {AF_QIPCRTR, it->dst_node,
+						   it->dst_port};
+			struct qrtr_node *n;
+
+			n = qrtr_node_lookup(it->dst_node);
+			if (n) {
+				qrtr_node_enqueue(n, it->skb, it->type,
+						  &from, &to);
+				qrtr_node_release(n);
+				it->skb = NULL;
+			}
+		}
+		kfree_skb(it->skb);
+		list_del(&it->node);
+		kfree(it);
+	}
+}
+
 /**
  * qrtr_endpoint_post() - post incoming data
  * @ep: endpoint handle
@@ -541,8 +639,22 @@ int qrtr_endpoint_post(struct qrtr_endpoint *ep, const void *data, size_t len)
 		qrtr_node_assign(node, le32_to_cpu(pkt->server.node));
 	}
 
+	/* 控制包：转发给其它端点（服务公告/下线跨传输可见） */
+	if (cb->type != QRTR_TYPE_DATA && cb->type != QRTR_TYPE_HELLO &&
+	    cb->type != QRTR_TYPE_RESUME_TX)
+		qrtr_fwd_queue(skb, cb->type, true, cb->src_node,
+			       cb->src_port, cb->dst_node, cb->dst_port);
+
 	if (cb->type == QRTR_TYPE_RESUME_TX) {
 		qrtr_tx_resume(node, skb);
+	} else if (cb->type == QRTR_TYPE_DATA &&
+		   cb->dst_node != qrtr_local_nid &&
+		   cb->dst_node != cb->src_node) {
+		/* DATA：目的不是本机 → 按 dst_node 转发出去 */
+		qrtr_fwd_queue(skb, cb->type, false, cb->src_node,
+			       cb->src_port, cb->dst_node, cb->dst_port);
+		consume_skb(skb);
+		return 0;
 	} else {
 		ipc = qrtr_port_lookup(cb->dst_port);
 		if (!ipc)

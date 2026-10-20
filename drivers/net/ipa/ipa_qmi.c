@@ -9,6 +9,21 @@
 #include <linux/types.h>
 
 #include "ipa.h"
+
+/* [crux] 由 ipa_mhi_proxy.c 导出：modem IPA QMI 服务（重新）到达时触发 0x3c */
+/* [crux] 由 ipa_mhi_proxy.ko 导出；本文件编进 vmlinux，不能直接引用模块符号 */
+static void crux_mhi_proxy_retrigger(void)
+{
+#if IS_MODULE(CONFIG_IPA_MHI_PROXY)
+	extern void ipa_mhi_proxy_retrigger(void);
+	void (*fn)(void) = symbol_get(ipa_mhi_proxy_retrigger);
+
+	if (fn) {
+		fn();
+		symbol_put(ipa_mhi_proxy_retrigger);
+	}
+#endif
+}
 #include "ipa_mem.h"
 #include "ipa_modem.h"
 #include "ipa_qmi_msg.h"
@@ -121,6 +136,11 @@ static void ipa_qmi_indication(struct ipa_qmi *ipa_qmi)
  */
 static void ipa_qmi_ready(struct ipa_qmi *ipa_qmi)
 {
+	struct ipa *__ipa0 = container_of(ipa_qmi, struct ipa, qmi);
+
+	dev_info(__ipa0->dev, "[crux qmi] ready-check: modem_ready=%d uc_ready=%d initial_boot=%d ind_req=%d ind_sent=%d\n",
+		 ipa_qmi->modem_ready, ipa_qmi->uc_ready, ipa_qmi->initial_boot,
+		 ipa_qmi->indication_requested, ipa_qmi->indication_sent);
 	struct ipa *ipa;
 	int ret;
 
@@ -155,6 +175,7 @@ static void ipa_server_bye(struct qmi_handle *qmi, unsigned int node)
 	ipa_qmi = container_of(qmi, struct ipa_qmi, server_handle);
 
 	/* The modem client and server go away at the same time */
+	pr_info("[crux ipa] server_bye node=%u -> modem_sq cleared\n", node);
 	memset(&ipa_qmi->modem_sq, 0, sizeof(ipa_qmi->modem_sq));
 
 	/* initial_boot doesn't change when modem reboots */
@@ -193,6 +214,13 @@ static void ipa_server_indication_register(struct qmi_handle *qmi,
 				ipa_indication_register_rsp_ei, &rsp);
 	if (!ret) {
 		ipa_qmi->indication_requested = true;
+		/* [crux 2026-10-19] 对齐原厂 ipa3_handle_indication_req()：
+		 * 缓存 modem 作为 client 的 sq，供 0x3c 等 INDICATION 使用。
+		 */
+		ipa_qmi->modem_client_sq = *sq;
+		dev_info(ipa->dev,
+			 "[crux qmi] INDICATION_REGISTER from modem (client %u:%u)\n",
+			 sq->sq_node, sq->sq_port);
 		ipa_qmi_ready(ipa_qmi);		/* We might be ready now */
 	} else {
 		dev_err(ipa->dev,
@@ -222,11 +250,242 @@ static void ipa_server_driver_init_complete(struct qmi_handle *qmi,
 				ipa_driver_init_complete_rsp_ei, &rsp);
 	if (!ret) {
 		ipa_qmi->uc_ready = true;
+		dev_info(ipa->dev, "[crux qmi] DRIVER_INIT_COMPLETE from modem (uc_ready=1)\n");
 		ipa_qmi_ready(ipa_qmi);		/* We might be ready now */
 	} else {
 		dev_err(ipa->dev,
 			"error %d sending init complete response\n", ret);
 	}
+}
+
+/*
+ * [crux 2026-10-16] IPA-MHI proxy support
+ *
+ * The AP must tell the internal modem where the external modem's proxy MHI
+ * channel/event doorbells are (QMI_IPA_MHI_READY_IND, 0x3c) before the modem
+ * can hand us the MHI channel contexts (ALLOC_CHANNEL, 0x3d).  We remember
+ * the IPA instance here so the ipa_mhi_proxy module can reach the QMI
+ * client handle that talks to the modem.
+ */
+static struct ipa *ipa_mhi_proxy_ipa;
+
+/* [crux 2026-10-17] 0x3d ALLOC_CHANNEL 的真正处理要落到外部 modem 的 MHI 控制器上，
+ * 而它在 ipa_mhi_proxy 模块里。这里只留一个回调给模块注册。
+ */
+typedef int (*ipa_mhi_alloc_handler_t)(const u8 *tr, u32 tr_len,
+				       const u8 *er, u32 er_len);
+static ipa_mhi_alloc_handler_t ipa_mhi_alloc_handler;
+
+int ipa_qmi_register_mhi_alloc_handler(ipa_mhi_alloc_handler_t fn)
+{
+	ipa_mhi_alloc_handler = fn;
+	pr_info("[crux-qmi] alloc handler registered: %ps\n", fn);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(ipa_qmi_register_mhi_alloc_handler);
+
+
+int ipa_qmi_send_mhi_ready_ind(const struct ipa_mhi_ch_init_info *ch,
+			       unsigned int n_ch)
+{
+	struct crux_mhi_ready_ind ind;
+	struct ipa_qmi *ipa_qmi;
+	ssize_t ret;
+
+	if (!ipa_mhi_proxy_ipa || !n_ch ||
+	    n_ch > ARRAY_SIZE(ind.ch)) {
+		pr_info("[crux mhi-proxy] helper: bad arg (ipa=%px n_ch=%u)\n",
+			ipa_mhi_proxy_ipa, n_ch);
+		return -EINVAL;
+	}
+	ipa_qmi = &ipa_mhi_proxy_ipa->qmi;
+	if (!ipa_qmi->modem_sq.sq_node && !ipa_qmi->modem_sq.sq_port)
+		return -ENOTCONN;
+
+	memset(&ind, 0, sizeof(ind));
+	ind.ch_info_arr_len = n_ch;
+	memcpy(ind.ch, ch, n_ch * sizeof(*ch));
+	/* [crux 2026-10-19] 对齐原厂 _populate_smmu_info()：SMMU 平台上必须带
+	 * smmu_info TLV(0x10)。首次发 0x3c 时 ctrl/data 的 base/size 仍为 0
+	 * （要等 0x3d 的 ctrl/data_addr_map_info 才填），原厂首次亦如此。
+	 */
+	ind.smmu_info_valid = 1;
+
+	/* [crux 2026-10-19] 原厂语义：0x3c 是 INDICATION，发完即走，
+	 * 不等 response（modem 不会回）。这里用 qmi_send_indication()，
+	 * 报文用标准 TLV（crux_mhi_ready_ind_ei），与
+	 * ipa_mhi_ready_indication_msg_v01 逐字节等价。
+	 */
+	/* qmi_send_indication() 的 len 是【最大编码缓冲长度】而非结构体大小：
+	 * 编码后为 7(hdr)+3(TLV hdr)+1(count)+2*14(ch_info) = 39 字节。
+	 * 传 sizeof(ind)=32 会被编码器判为 -ETOOSMALL(-525)。
+	 * 取原厂 IPA_MHI_READY_INDICATION_MSG_V01_MAX_MSG_LEN = 123。
+	 */
+	/* 原厂：qmi_send_indication(ipa3_svc_handle, &client_sq, ...) ——用的是
+	 * 【server handle】(源端口=host IPA service)，目标才是 modem。
+	 * 用 client_handle 发送时源端口是临时端口，modem 不认。
+	 */
+	/* [crux 2026-10-19] 原厂 ipa3_qmi_send_mhi_ready_indication() 的目标是
+	 * ipa3_qmi_ctx->client_sq（modem 的 client 地址），不是 modem 的
+	 * server 端口。发给 server 端口 modem 只会当成普通请求回一个 resp，
+	 * 不会走 MHI 通道分配流程，0x3d 永远不来。
+	 */
+	if (ipa_qmi->modem_client_sq.sq_node || ipa_qmi->modem_client_sq.sq_port) {
+		pr_info("[crux mhi-proxy] 0x3c -> modem client %u:%u\n",
+			ipa_qmi->modem_client_sq.sq_node,
+			ipa_qmi->modem_client_sq.sq_port);
+		ret = qmi_send_indication(&ipa_qmi->server_handle,
+					  &ipa_qmi->modem_client_sq,
+					  IPA_QMI_MHI_READY_IND,
+					  123, crux_mhi_ready_ind_ei, &ind);
+	} else {
+		pr_warn("[crux mhi-proxy] no modem client sq yet, fallback to server %u:%u\n",
+			ipa_qmi->modem_sq.sq_node, ipa_qmi->modem_sq.sq_port);
+		ret = qmi_send_indication(&ipa_qmi->server_handle,
+					  &ipa_qmi->modem_sq,
+					  IPA_QMI_MHI_READY_IND,
+					  123, crux_mhi_ready_ind_ei, &ind);
+	}
+	if (ret < 0)
+		pr_err("[crux mhi-proxy] send 0x3c failed %zd\n", ret);
+	else
+		pr_info("[crux mhi-proxy] 0x3c IND sent (%zd bytes, %u ch)\n",
+			ret, n_ch);
+
+	return ret < 0 ? ret : 0;
+}
+EXPORT_SYMBOL_GPL(ipa_qmi_send_mhi_ready_ind);
+
+/* [crux 2026-10-16] Handle MHI_ALLOC_CHANNEL (0x3d) from the modem:
+ * log the payload it hands us (TR/ER contexts); programming the external
+ * modem's contexts with mhi_device_configure() is the next step.
+ */
+static void ipa_server_mhi_alloc_channel(struct qmi_handle *qmi,
+					 struct sockaddr_qrtr *sq,
+					 struct qmi_txn *txn,
+					 const void *decoded)
+{
+	const struct ipa_mhi_alloc_ch_req *req = decoded;
+	struct ipa_mhi_alloc_ch_rsp rsp = {
+		.rsp.result = QMI_RESULT_SUCCESS_V01,
+		.rsp.error = QMI_ERR_NONE_V01,
+	};
+	u32 len = min_t(u32, req->payload_len, sizeof(req->payload));
+	int ret;
+
+	pr_info("[crux mhi-proxy] MHI_ALLOC_CHANNEL from %u:%u payload_len=%u er_len=%u\n",
+		sq->sq_node, sq->sq_port, req->payload_len, req->er_payload_len);
+	print_hex_dump(KERN_INFO, "[crux mhi-proxy] alloc TR: ",
+		       DUMP_PREFIX_OFFSET, 16, 1, req->payload, len, true);
+	print_hex_dump(KERN_INFO, "[crux mhi-proxy] alloc ER: ",
+		       DUMP_PREFIX_OFFSET, 16, 1, req->er_payload,
+		       min_t(u32, req->er_payload_len, sizeof(req->er_payload)), true);
+
+	if (ipa_mhi_alloc_handler) {
+		int cfg = ipa_mhi_alloc_handler(req->payload, req->payload_len,
+					 req->er_payload, req->er_payload_len);
+		if (cfg) {
+			pr_err("[crux mhi-proxy] alloc handler failed %d\n", cfg);
+			rsp.rsp.result = QMI_RESULT_FAILURE_V01;
+			rsp.rsp.error = QMI_ERR_INTERNAL_V01;
+		} else {
+			pr_info("[crux mhi-proxy] alloc handler OK (CCA/ECA programmed)\n");
+		}
+	} else {
+		pr_err("[crux mhi-proxy] no alloc handler registered!\n");
+	}
+
+	ret = qmi_send_response(qmi, sq, txn, IPA_QMI_MHI_ALLOC_CHANNEL,
+				sizeof(rsp), ipa_mhi_alloc_ch_rsp_ei, &rsp);
+	if (ret)
+		pr_err("[crux mhi-proxy] alloc resp failed %d\n", ret);
+}
+
+/* [crux 2026-10-17] 最小实现：主线没实现的 modem -> AP 请求
+ *   （实测见到的：0x27 IPA_CONFIG_REQ ~61B、0x23 INSTALL_FILTER_RULE_REQ 1031B）
+ * 处理方式：收下 -> 原始 hex 已在 qmi_interface.c 里 dump -> 回一个通用成功响应。
+ * 目的只有一个：看 modem 的 IPA 初始化会不会因此继续走（进而发 0x3d
+ * MHI_ALLOC_CHANNEL）。不做任何实际配置，不搬 vendor 的 EI 表 / 40KB 结构。
+ */
+struct ipa_generic_rsp {
+	struct qmi_response_type_v01 rsp;
+};
+
+/* qmi_send_response() 的 len 是“TLV 编码后的最大长度”，不是 sizeof(结构)！
+ * 主线其它响应都传常量（如 IPA_QMI_INDICATION_REGISTER_RSP_SZ = 7）。
+ * 传 sizeof(rsp)=4 会得到 qmi_encode: Too Small Buffer -> -525。
+ */
+#define IPA_QMI_GENERIC_RSP_SZ	7	/* TLV header(3) + result/error(4) */
+
+static const struct qmi_elem_info ipa_generic_rsp_ei[] = {
+	{
+		.data_type	= QMI_STRUCT,
+		.elem_len	= 1,
+		.elem_size	= sizeof(struct qmi_response_type_v01),
+		.array_type	= NO_ARRAY,
+		.tlv_type	= 0x02,
+		.offset		= offsetof(struct ipa_generic_rsp, rsp),
+		.ei_array	= qmi_response_type_v01_ei,
+	},
+	{ }
+};
+
+/* [crux 2026-10-17] 默认只 dump、**不**伪造成功响应。
+ * 原因：给 modem 的 0x27 (IPA_CONFIG_REQ) / 0x23 (INSTALL_FILTER_RULE)
+ * 回“成功”会让 modem 误以为 IPA 已经配置好；之后 modem 一切 online 去用那套
+ * 并不存在的配置，就可能把 IPA/GSI 卡死 -> AP 整机 hang（实机复现两次）。
+ * 需要探测“完全不回响应 modem 会不会继续”时，运行时开开关：
+ *   insmod ipa.ko ack_unknown=1  或  echo 1 > /sys/module/ipa/parameters/ack_unknown
+ */
+static bool ack_unknown;
+/* 只对 IPA 初始化两类请求（0x27 CONFIG / 0x23 INSTALL_FILTER_RULE）回成功；
+ * 与 ack_unknown 分开，避免把未知请求一概 fake 成功。
+ */
+static bool ack_ipa_init = true;
+module_param(ack_ipa_init, bool, 0644);
+MODULE_PARM_DESC(ack_ipa_init,
+		 "Ack IPA_CONFIG/INSTALL_FILTER_RULE from modem (no real filter install)");
+
+module_param(ack_unknown, bool, 0644);
+MODULE_PARM_DESC(ack_unknown,
+		 "Reply success to unhandled modem IPA requests (fakes IPA config, risky)");
+
+static void ipa_server_unhandled_req(struct qmi_handle *qmi,
+				     struct sockaddr_qrtr *sq,
+				     struct qmi_txn *txn, u16 msg_id,
+				     const void *buf, size_t len)
+{
+	struct ipa_generic_rsp rsp = {
+		.rsp.result = QMI_RESULT_SUCCESS_V01,
+		.rsp.error = QMI_ERR_NONE_V01,
+	};
+	int ret;
+
+	/* [crux 2026-10-17] 只对“初始化类”请求单独放行（不开启危险的全量 ack）：
+	 *   0x27 IPA_CONFIG_REQ     —— 原厂也只是接收并缓存配置，然后回成功
+	 *   0x23 INSTALL_FILTER_RULE —— 原厂会真的装 UL 过滤规则；主线没有对应 API，
+	 *                                这里只回成功（rule 列表置空），属于已知局限
+	 */
+	if (!ack_unknown) {
+		if (ack_ipa_init && (msg_id == IPA_QMI_IPA_CONFIG ||
+				     msg_id == IPA_QMI_INSTALL_FILTER_RULE)) {
+			pr_info("[crux-qmi] ack init req id=0x%04x len=%zu -> success (filters NOT programmed)\n",
+				msg_id, len);
+		} else {
+			pr_info("[crux-qmi] no ack for id=0x%04x (ack_unknown=0)\n",
+				msg_id);
+			return;
+		}
+	}
+
+	pr_info("[crux-qmi] generic ack id=0x%04x len=%zu -> %u:%u\n",
+		msg_id, len, sq->sq_node, sq->sq_port);
+
+	ret = qmi_send_response(qmi, sq, txn, msg_id, IPA_QMI_GENERIC_RSP_SZ,
+				ipa_generic_rsp_ei, &rsp);
+	if (ret)
+		pr_err("[crux-qmi] generic ack id=0x%04x failed %d\n",
+		       msg_id, ret);
 }
 
 /* The server handles two request message types sent by the modem. */
@@ -245,6 +504,13 @@ static const struct qmi_msg_handler ipa_server_msg_handlers[] = {
 		.decoded_size	= IPA_QMI_DRIVER_INIT_COMPLETE_REQ_SZ,
 		.fn		= ipa_server_driver_init_complete,
 	},
+	{
+		.type		= QMI_REQUEST,
+		.msg_id		= IPA_QMI_MHI_ALLOC_CHANNEL,
+		.ei		= ipa_mhi_alloc_ch_req_ei,
+		.decoded_size	= sizeof(struct ipa_mhi_alloc_ch_req),
+		.fn		= ipa_server_mhi_alloc_channel,
+	},
 	{ },
 };
 
@@ -253,12 +519,33 @@ static void ipa_client_init_driver(struct qmi_handle *qmi,
 				   struct sockaddr_qrtr *sq,
 				   struct qmi_txn *txn, const void *decoded)
 {
+	struct ipa_qmi *__ipa_qmi = container_of(qmi, struct ipa_qmi, client_handle);
+	struct ipa *__ipa = container_of(__ipa_qmi, struct ipa, qmi);
+
+	dev_info(__ipa->dev, "[crux qmi] INIT_DRIVER response received\n");
 	txn->result = 0;	/* IPA_QMI_INIT_DRIVER request was successful */
 	complete(&txn->completion);
 }
 
 /* The client handles one response message type sent by the modem. */
+/* [crux 2026-10-17] 0x3c 的响应处理：modem 回的是通用 result/error */
+static void ipa_client_mhi_ready_ind_rsp(struct qmi_handle *qmi,
+					 struct sockaddr_qrtr *sq,
+					 struct qmi_txn *txn,
+					 const void *decoded)
+{
+	const struct qmi_response_type_v01 *rsp = decoded;
+
+	pr_info("[crux-qmi] 0x3c RESPONSE: result=%u error=%u (from %u:%u)\n",
+		rsp->result, rsp->error, sq->sq_node, sq->sq_port);
+}
+
 static const struct qmi_msg_handler ipa_client_msg_handlers[] = {
+	{
+		.type		= QMI_RESPONSE,
+		.msg_id		= IPA_QMI_MHI_READY_IND,
+		.fn		= ipa_client_mhi_ready_ind_rsp,
+	},
 	{
 		.type		= QMI_RESPONSE,
 		.msg_id		= IPA_QMI_INIT_DRIVER,
@@ -397,6 +684,30 @@ init_modem_driver_req(struct ipa_qmi *ipa_qmi)
 	return &req;
 }
 
+/* [crux 2026-10-19] 与基带配合：INIT_DRIVER 失败后自动延时重试。
+ * 基带（X50）从 SBL 进 mission mode 后，它的 IPA 服务 / QRTR 端点需要
+ * 几秒到几十秒才真正就绪，期间发的 INIT_DRIVER 会石沉大海（-110 超时）。
+ * 所以失败后不清盘，3 秒后重来，最多 6 次。
+ */
+static struct delayed_work ipa_qmi_rehs_work;
+static bool ipa_qmi_rehs_active;
+static unsigned int ipa_qmi_rehs_retry;
+#define IPA_QMI_REHS_MAX_RETRY	6
+#define IPA_QMI_REHS_DELAY_MS	3000
+
+static void ipa_qmi_rehs_worker(struct work_struct *work)
+{
+	struct ipa *ipa = ipa_mhi_proxy_ipa;
+
+	if (!ipa)
+		return;
+
+	dev_info(ipa->dev, "[crux qmi] rehandshake retry %u\n",
+		 ipa_qmi_rehs_retry);
+	ipa->uc_loaded = false;
+	schedule_work(&ipa->qmi.init_driver_work);
+}
+
 /* Send an INIT_DRIVER request to the modem, and wait for it to complete. */
 static void ipa_client_init_driver_work(struct work_struct *work)
 {
@@ -423,6 +734,9 @@ static void ipa_client_init_driver_work(struct work_struct *work)
 
 	/* Send the request, and if successful wait for its response */
 	req = init_modem_driver_req(ipa_qmi);
+	dev_info(dev, "[crux qmi] sending INIT_DRIVER to node=%u port=%u skip_uc_load=%u\n",
+		 ipa_qmi->modem_sq.sq_node, ipa_qmi->modem_sq.sq_port,
+		 req->skip_uc_load);
 	ret = qmi_send_request(qmi, &ipa_qmi->modem_sq, &txn,
 			       IPA_QMI_INIT_DRIVER, IPA_QMI_INIT_DRIVER_REQ_SZ,
 			       ipa_init_modem_driver_req_ei, req);
@@ -430,15 +744,103 @@ static void ipa_client_init_driver_work(struct work_struct *work)
 		dev_err(dev, "error %d sending init driver request\n", ret);
 	else if ((ret = qmi_txn_wait(&txn, timeout)))
 		dev_err(dev, "error %d awaiting init driver response\n", ret);
+	dev_info(dev, "[crux qmi] INIT_DRIVER send/wait ret=%d\n", ret);
 
 	if (!ret) {
 		ipa_qmi->modem_ready = true;
 		ipa_qmi_ready(ipa_qmi);		/* We might be ready now */
+		if (ipa_qmi_rehs_active) {
+			ipa_qmi_rehs_active = false;
+			dev_info(dev, "[crux qmi] handshake done after %u retries\n",
+				 ipa_qmi_rehs_retry);
+		}
 	} else {
 		/* If any error occurs we need to cancel the transaction */
 		qmi_txn_cancel(&txn);
+
+		/* [crux 2026-10-19] 与基带配合：基带还没就绪，延时重试 */
+		if (ipa_qmi_rehs_active &&
+		    ipa_qmi_rehs_retry < IPA_QMI_REHS_MAX_RETRY) {
+			ipa_qmi_rehs_retry++;
+			dev_info(dev,
+				 "[crux qmi] INIT_DRIVER failed %d, retry %u/%d\n",
+				 ret, ipa_qmi_rehs_retry, IPA_QMI_REHS_MAX_RETRY);
+			schedule_delayed_work(&ipa_qmi_rehs_work,
+				msecs_to_jiffies(IPA_QMI_REHS_DELAY_MS));
+		} else if (ipa_qmi_rehs_active) {
+			ipa_qmi_rehs_active = false;
+			dev_err(dev, "[crux qmi] handshake gave up after %u retries\n",
+				ipa_qmi_rehs_retry);
+		}
 	}
 }
+
+/* [crux 2026-10-19] 外部触发一次重新握手。
+ * 场景：X50 在 crux 启动后才 pwr_on/feed，QRTR 里 modem 的 IPA service
+ * 端口没变（node0 port31），QRTR 不会再报一次 NEW_SERVER，于是内核不会
+ * 重发 INIT_DRIVER、也不会收到新的 INDICATION_REGISTER —— modem_client_sq
+ * 一直是上一个实例的 client 端口，INDICATION 发过去无人接收，0x3d 不回。
+ * 这里手动重发 INIT_DRIVER，让 modem 重新走一遍握手并重新登记 client sq。
+ */
+int ipa_qmi_rehandshake(u32 node, u32 port)
+{
+	struct ipa *ipa = ipa_mhi_proxy_ipa;
+	struct ipa_qmi *ipa_qmi;
+
+	if (!ipa)
+		return -ENODEV;
+
+	ipa_qmi = &ipa->qmi;
+	/* node/port 传 0 时沿用当前已协商的 modem server 地址；
+	 * 若已被 server_bye 清空，退回 node0 port31（X50 的 IPA control service）。
+	 */
+	if (!port) {
+		if (ipa_qmi->modem_sq.sq_port) {
+			node = ipa_qmi->modem_sq.sq_node;
+			port = ipa_qmi->modem_sq.sq_port;
+		} else {
+			node = 0;
+			port = 31;
+		}
+	}
+	ipa_qmi->modem_sq.sq_family = AF_QIPCRTR;
+	ipa_qmi->modem_sq.sq_node = node;
+	ipa_qmi->modem_sq.sq_port = port;
+	/* 让下一次 INDICATION_REGISTER 一定覆盖旧值 */
+	memset(&ipa_qmi->modem_client_sq, 0, sizeof(ipa_qmi->modem_client_sq));
+
+	/* [crux 2026-10-19] X50 是新启动的实例，uC 固件需要重新加载。
+	 * init_modem_driver_req() 里 skip_uc_load = ipa->uc_loaded ? 1 : 0，
+	 * 首次 boot 后 uc_loaded 一直是 1，重握手就会带 skip_uc_load=1，
+	 * modem 认为不用加载 uC 而**不回应 INIT_DRIVER**（实测 60s 超时）。
+	 * 所以这里清掉，让它重新走一遍 uC 加载。
+	 */
+	ipa->uc_loaded = false;
+
+	dev_info(ipa->dev, "[crux qmi] rehandshake -> %u:%u\n", node, port);
+
+	ipa_qmi_rehs_active = true;
+	ipa_qmi_rehs_retry = 0;
+	INIT_DELAYED_WORK(&ipa_qmi_rehs_work, ipa_qmi_rehs_worker);
+	schedule_work(&ipa_qmi->init_driver_work);
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(ipa_qmi_rehandshake);
+
+/* [crux 2026-10-19] 供 ipa_mhi_proxy 查询：modem 的 client 端点是否已就绪。
+ * 只有拿到 modem 发来的 INDICATION_REGISTER 之后，0x3c 才有正确去处。
+ */
+bool ipa_qmi_modem_client_ready(void)
+{
+	struct ipa *ipa = ipa_mhi_proxy_ipa;
+
+	if (!ipa)
+		return false;
+
+	return ipa->qmi.modem_client_sq.sq_port != 0;
+}
+EXPORT_SYMBOL_GPL(ipa_qmi_modem_client_ready);
 
 /* The modem server is now available.  We will send an INIT_DRIVER request
  * to the modem, but can't wait for it to complete in this callback thread.
@@ -454,6 +856,13 @@ ipa_client_new_server(struct qmi_handle *qmi, struct qmi_service *svc)
 	ipa_qmi->modem_sq.sq_family = AF_QIPCRTR;
 	ipa_qmi->modem_sq.sq_node = svc->node;
 	ipa_qmi->modem_sq.sq_port = svc->port;
+	crux_mhi_proxy_retrigger();
+
+	{
+		struct ipa *__ipa1 = container_of(ipa_qmi, struct ipa, qmi);
+
+		dev_info(__ipa1->dev, "[crux qmi] modem IPA service arrived: node=%u port=%u\n", svc->node, svc->port);
+	}
 
 	schedule_work(&ipa_qmi->init_driver_work);
 
@@ -470,6 +879,7 @@ int ipa_qmi_setup(struct ipa *ipa)
 	struct ipa_qmi *ipa_qmi = &ipa->qmi;
 	int ret;
 
+	ipa_mhi_proxy_ipa = ipa;
 	ipa_qmi->initial_boot = true;
 
 	/* The server handle is used to handle the DRIVER_INIT_COMPLETE
@@ -483,6 +893,9 @@ int ipa_qmi_setup(struct ipa *ipa)
 			      ipa_server_msg_handlers);
 	if (ret)
 		return ret;
+
+	/* [crux] bring-up: 接住主线没实现的 modem->AP 请求（只 dump + 通用成功应答） */
+	ipa_qmi->server_handle.unhandled_req = ipa_server_unhandled_req;
 
 	ret = qmi_add_server(&ipa_qmi->server_handle, IPA_HOST_SERVICE_SVC_ID,
 			     IPA_HOST_SVC_VERS, IPA_HOST_SERVICE_INS_ID);
@@ -503,6 +916,10 @@ int ipa_qmi_setup(struct ipa *ipa)
 
 	ret = qmi_add_lookup(&ipa_qmi->client_handle, IPA_MODEM_SERVICE_SVC_ID,
 			     IPA_MODEM_SVC_VERS, IPA_MODEM_SERVICE_INS_ID);
+
+	dev_info(ipa->dev, "[crux qmi] setup done: server 0x31/%u/%u + lookup 0x31/%u/%u\n",
+		 IPA_HOST_SVC_VERS, IPA_HOST_SERVICE_INS_ID,
+		 IPA_MODEM_SVC_VERS, IPA_MODEM_SERVICE_INS_ID);
 	if (ret)
 		goto err_client_handle_release;
 

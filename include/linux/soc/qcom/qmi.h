@@ -247,7 +247,16 @@ struct qmi_handle {
 	struct mutex txn_lock;
 
 	const struct qmi_msg_handler *handlers;
+
+	/* [crux] bring-up: 没有匹配 handler 的请求交给 owner 处理（可为空）。
+	 * 主线只实现 IPA QMI 的少数几条消息，modem 侧还会发 0x27 IPA_CONFIG_REQ、
+	 * 0x23 INSTALL_FILTER_RULE_REQ 等；这里给 owner 一个收下并应答的机会。
+	 */
+	void (*unhandled_req)(struct qmi_handle *qmi, struct sockaddr_qrtr *sq,
+			      struct qmi_txn *txn, u16 msg_id,
+			      const void *buf, size_t len);
 };
+
 
 int qmi_add_lookup(struct qmi_handle *qmi, unsigned int service,
 		   unsigned int version, unsigned int instance);

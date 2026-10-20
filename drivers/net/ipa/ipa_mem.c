@@ -637,7 +637,14 @@ int ipa_mem_init(struct ipa *ipa, struct platform_device *pdev,
 	if (!ipa_table_mem_valid(ipa, true))
 		return -EINVAL;
 
-	ret = dma_set_mask_and_coherent(dev, DMA_BIT_MASK(64));
+	/*
+	 * [crux 2026-10-15] Must be a 32-bit mask. With 64 bits the GSI ring/TRE
+	 * addresses can land at the top of the 48-bit space, and GSI then reports
+	 * channel global error code=0x1 (GSI_INVALID_TRE); gsi_trans_commit_wait
+	 * then never completes and ipa_probe hangs. Verified on this port: with 32
+	 * bits ipa_mem_setup returns 0 immediately.
+	 */
+	ret = dma_set_mask_and_coherent(dev, DMA_BIT_MASK(32));
 	if (ret) {
 		dev_err(dev, "error %d setting DMA mask\n", ret);
 		return ret;

@@ -325,10 +325,16 @@ static int samsung_ea8076_f1s_unprepare(struct drm_panel *panel)
 	}
 
 static const struct drm_display_mode samsung_ea8076_f1s_modes[] = {
+	/*
+	 * [crux] 四档统一 hfp/hbp=64/64（htotal1228）：实机证明 hfp/hbp 在切档时
+	 * 不会被硬件采纳（htotal 恒 1228），统一之后 htotal 与硬件一致，clock 由
+	 * CRUX_MODE 宏按 fps*htotal*vtotal 算出，等效给足 DSI 链路余量（对齐原厂
+	 * clockrate 1110/1320/1485/1540Mbps 的补偿思路）。
+	 */
 	CRUX_MODE(60, 64, 64, 20, 64, 88, 20, 0),
-	CRUX_MODE(72, 32, 16, 20, 16, 16, 20, 0),
-	CRUX_MODE(81, 32, 16, 20, 16, 16, 20, 0),
-	CRUX_MODE(90, 32, 16, 20, 16, 16, 20, 0),
+	CRUX_MODE(72, 64, 64, 20, 16, 16, 20, 0),
+	CRUX_MODE(81, 64, 64, 20, 16, 16, 20, 0),
+	CRUX_MODE(90, 64, 64, 20, 16, 16, 20, 0),
 };
 
 static int samsung_ea8076_f1s_get_modes(struct drm_panel *panel,

@@ -1542,14 +1542,21 @@ static int of_qcom_slim_ngd_register(struct device *parent,
 		platform_device_set_of_node(ngd->pdev, node);
 		ctrl->ngd = ngd;
 
+		/* crux: ngd->base 必须在 platform_device_add() 之前算好 —— add() 会同步
+		 * probe 子设备，而子设备 probe 会 schedule ngd_up_work；PM 核心也可能在此
+		 * 时 resume，两条路都会走到 qcom_slim_ngd_power_up() 读 ngd->base。原顺序
+		 * 把赋值放在 add() 之后，窗口内读到 NULL → readl(ngd->base + NGD_STATUS)
+		 * 空指针（fault 地址 0x4）。
+		 */
+		ngd->base = ctrl->base + ngd->id * data->offset +
+					(ngd->id - 1) * data->size;
+
 		ret = platform_device_add(ngd->pdev);
 		if (ret) {
 			platform_device_put(ngd->pdev);
 			kfree(ngd);
 			return ret;
 		}
-		ngd->base = ctrl->base + ngd->id * data->offset +
-					(ngd->id - 1) * data->size;
 
 		return 0;
 	}

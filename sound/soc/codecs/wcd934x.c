@@ -3007,8 +3007,15 @@ static int wcd934x_comp_probe(struct snd_soc_component *component)
 		return ret;
 	}
 
-	if (wcd934x_mbhc_init(component))
+	/* [crux 2026-10-20] 本机没有 3.5mm 耳机口，MBHC 的阻抗检测
+	 * 只会反复报 "Impedance detect ramp error"，用 DT 属性直接跳过。
+	 */
+	if (of_property_read_bool(component->dev->of_node,
+				  "qcom,mbhc-disabled")) {
+		dev_info(component->dev, "[crux] MBHC disabled by DT\n");
+	} else if (wcd934x_mbhc_init(component)) {
 		dev_err(component->dev, "Failed to Initialize MBHC\n");
+	}
 
 	return 0;
 }
@@ -5880,6 +5887,13 @@ static int wcd934x_codec_probe(struct platform_device *pdev)
 
 	wcd934x_register_mclk_output(wcd);
 	platform_set_drvdata(pdev, wcd);
+
+	/* crux: mfd 的 codec cell 没有 of_compatible → 该平台子设备 of_node 为 NULL，
+	 * 导致 ASoC 用 sound-dai = <&wcd9340 AIF1_PB> 匹配组件时失败（card -ENODEV）。
+	 * 继承父设备（SLIM 设备 codec@1,0）的 of_node 修正。
+	 */
+	if (!dev->of_node && dev->parent && dev->parent->of_node)
+		device_set_node(dev, of_fwnode_handle(dev->parent->of_node));
 
 	return devm_snd_soc_register_component(dev, &wcd934x_component_drv,
 					       wcd934x_slim_dais,

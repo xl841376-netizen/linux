@@ -65,6 +65,15 @@ static int crux_last_err;
 static bool crux_cut_started;
 static struct kobject *crux_shutdown_kobj;
 
+/*
+ * [crux 2026-10-19] SM8150 的 PS_HOLD 寄存器（APCS 区）。
+ * 实测 0x0c264000 可读写、值为 1（assert），写 0 后整机立即掉电/复位，
+ * 所以它就是真正的 PS_HOLD。sm8150 的 DT 里没有 qcom,pshold 节点，
+ * msm-poweroff 从不 probe，这里直接映射，不依赖设备树。
+ */
+static unsigned long crux_pshold_pa = 0x0c264000;	/* 改这里可换地址 */
+static void __iomem *crux_pshold;
+
 /* 层一：记录 */
 static char crux_dev_done[CRUX_DEV_MAX][CRUX_DEV_NAME];
 static char crux_dev_drv[CRUX_DEV_MAX][CRUX_DEV_NAME];
@@ -670,6 +679,33 @@ static void crux_reason_default(const char *def)
 }
 
 /* 不能睡眠的阶段：跑各驱动的收尾步骤，最后一下硬断电 */
+/*
+ * [crux 2026-10-19] 关机路径把 report 落盘：断电后重启能直接看到
+ * 关机时到底走到了哪一步（PON 定向是否成功、PS_HOLD 是否写了）。
+ * POWER_OFF 阶段 UFS 还活着，可以写。
+ */
+static void crux_report_flush_file(const char *tag)
+{
+	struct file *f;
+	loff_t pos = 0;
+	char path[] = "/var/log/shutdown-last.log";
+	ssize_t n;
+
+	if (!crux_report_len)
+		return;
+
+	f = filp_open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+	if (IS_ERR(f)) {
+		pr_warn("[crux] shutdown agent: flush open failed %ld\n", PTR_ERR(f));
+		return;
+	}
+
+	n = kernel_write(f, crux_report_buf, crux_report_len, &pos);
+	filp_close(f, NULL);
+	pr_emerg("[crux] shutdown agent: report flushed (%s, %zd bytes)\n",
+		 tag, n);
+}
+
 static int crux_poweroff(struct sys_off_data *data)
 {
 	if (crux_cut_started)
@@ -679,13 +715,48 @@ static int crux_poweroff(struct sys_off_data *data)
 	strscpy(crux_stage, "poweroff", sizeof(crux_stage));
 	crux_reason_default("kernel-poweroff");
 	crux_shutdown_report("agent", "POWEROFF begin, reason=%s", crux_reason);
+
+	/*
+	 * [crux 2026-10-19] 先落盘再断电，顺序很关键：
+	 *
+	 * 之前的顺序是 run_steps() -> 断电。但 run_steps 里跑的是同步驱动回调
+	 * （fts-park 会走 I2C），关机时一旦有一个回调阻塞，整条关机链就停住，
+	 * 没人写 PS_HOLD -> 20s 后 hung_task/watchdog 复位 = "假关机"。
+	 * 现在把断电提到 run_steps 之前：只要进了 poweroff 就一定会断电，
+	 * 后面步骤卡住也不影响关机。
+	 */
+	crux_report_flush_file("enter");
+
+	if (crux_pshold) {
+		crux_pon_force_type(true);
+		crux_shutdown_report("agent", "PON=SHUTDOWN, PS_HOLD low @%#lx",
+				     crux_pshold_pa);
+		crux_report_flush_file("before-cut");
+		pr_emerg("[crux] shutdown agent: PON=SHUTDOWN, pulling PS_HOLD low @%#lx\n",
+			 crux_pshold_pa);
+		writel(0, crux_pshold);
+		mdelay(1500);
+		pr_emerg("[crux] shutdown agent: PS_HOLD low but still alive\n");
+	}
+
 	crux_run_steps(CRUX_SHUTDOWN_POWEROFF);
 	crux_print_tail();
 
 	strscpy(crux_stage, "poweroff-not-cut", sizeof(crux_stage));
 	pr_emerg("[crux] shutdown agent: poweroff chain stopped\n");
 
-	return crux_last_err ? NOTIFY_DONE : NOTIFY_STOP;
+	/*
+	 * [crux 2026-10-19] 必须返回 NOTIFY_DONE，不能 NOTIFY_STOP。
+	 *
+	 * 真断电靠 msm_pshold_step()：它 writel(0) 之后 for(;;) mdelay()，
+	 * 永远不会返回到这里。所以只要能走到这一行，就说明**没有任何步骤
+	 * 真的把 PS_HOLD 拉低**（sm8150 没有 qcom,pshold 节点，msm-poweroff
+	 * 从不 probe，该步骤压根没注册）。
+	 *
+	 * 原来这里返回 NOTIFY_STOP，把 qcom-pon 的 POWER_OFF handler 掐断，
+	 * 结果只 halt 不断电 —— 就是"假关机"。交还给后面的 handler。
+	 */
+	return NOTIFY_DONE;
 }
 
 static int crux_restart(struct sys_off_data *data)
@@ -709,11 +780,18 @@ static int crux_restart(struct sys_off_data *data)
 
 	crux_write_restart_reason(crux_reason);
 	crux_check_critical();
+	/*
+	 * [crux 2026-10-19] 重启前确认 PON 动作是硬复位，别被上一次关机留下的
+	 * SHUTDOWN 定向影响。
+	 */
+	crux_pon_force_type(false);
+
 	crux_run_steps(CRUX_SHUTDOWN_VERIFY);
 	crux_run_steps(CRUX_SHUTDOWN_RESTART);
 	crux_print_tail();
 
-	return crux_last_err ? NOTIFY_DONE : NOTIFY_STOP;
+	/* [crux 2026-10-19] 同上：走到这里说明没断电，交还给 PSCI/qcom-pon 重启 */
+	return NOTIFY_DONE;
 }
 
 static int __init crux_shutdown_agent_init(void)
@@ -725,6 +803,16 @@ static int __init crux_shutdown_agent_init(void)
 	crux_shutdown_report("agent", "init: imem %s",
 			     ret ? "absent" : "ready");
 	crux_critical_init();
+
+	crux_pshold = ioremap(crux_pshold_pa, 4);
+	if (crux_pshold) {
+		pr_info("[crux] shutdown agent: PS_HOLD @%#lx = %#x\n",
+			crux_pshold_pa, readl(crux_pshold));
+		crux_shutdown_report("agent", "ps_hold pa=%#lx val=%#x",
+				     crux_pshold_pa, readl(crux_pshold));
+	} else {
+		pr_warn("[crux] shutdown agent: PS_HOLD ioremap failed\n");
+	}
 
 	crux_snap_len = crux_report_len;
 

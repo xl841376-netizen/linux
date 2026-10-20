@@ -4416,6 +4416,10 @@
 							#address-cells = <1>;
 							#size-cells = <0>;
 							#sound-dai-cells = <1>;
+							/* [crux 2026-10-20] 补上原厂 SID(0x1b21)，
+							 * 否则 DSP map region 失败/放音整机挂死。
+							 */
+							iommus = <&apps_smmu 0x1b21 0x0>;
 						};
 					};
 

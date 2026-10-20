@@ -1,4 +1,6 @@
 #!/bin/sh
+# [crux] 2026-10-18: CONFIG_LOCALVERSION 已设置时不再附加 git scm/"+" 后缀，
+#           版号固定为 7.3.0-rc5-crux73，只在手动改 CONFIG_LOCALVERSION 时才变。
 # SPDX-License-Identifier: GPL-2.0
 #
 # This scripts adds local version information from the version
@@ -198,7 +200,7 @@ config_localversion=$(sed -n 's/^CONFIG_LOCALVERSION=\(.*\)$/\1/p' include/confi
 if grep -q "^CONFIG_LOCALVERSION_AUTO=y$" include/config/auto.conf; then
 	# full scm version string
 	scm_version="$(scm_version)"
-elif [ "${LOCALVERSION+set}" != "set" ]; then
+elif [ "${LOCALVERSION+set}" != "set" ] && [ -z "${config_localversion}" ]; then
 	# If the variable LOCALVERSION is not set, append a plus
 	# sign if the repository is not in a clean annotated or
 	# signed tagged state (as git describe only looks at signed

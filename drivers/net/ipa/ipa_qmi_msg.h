@@ -18,6 +18,8 @@
 #define IPA_QMI_INDICATION_REGISTER	0x20	/* modem -> AP request */
 #define IPA_QMI_INIT_DRIVER		0x21	/* AP -> modem request */
 #define IPA_QMI_INIT_COMPLETE		0x22	/* AP -> modem indication */
+#define IPA_QMI_INSTALL_FILTER_RULE	0x23	/* modem -> AP request */
+#define IPA_QMI_IPA_CONFIG		0x27	/* modem -> AP request */
 #define IPA_QMI_DRIVER_INIT_COMPLETE	0x35	/* modem -> AP request */
 
 /* The maximum size required for message types.  These sizes include
@@ -34,7 +36,7 @@
 #define IPA_QMI_DRIVER_INIT_COMPLETE_RSP_SZ	7	/* <- server handle */
 
 /* Maximum size of messages we expect the AP to receive (max of above) */
-#define IPA_QMI_SERVER_MAX_RCV_SZ		8
+#define IPA_QMI_SERVER_MAX_RCV_SZ		1024
 #define IPA_QMI_CLIENT_MAX_RCV_SZ		25
 
 /* Request message for the IPA_QMI_INDICATION_REGISTER request */
@@ -260,3 +262,89 @@ extern const struct qmi_elem_info ipa_init_modem_driver_req_ei[];
 extern const struct qmi_elem_info ipa_init_modem_driver_rsp_ei[];
 
 #endif /* !_IPA_QMI_MSG_H_ */
+
+/* === [crux 2026-10-16] IPA-MHI proxy: AP -> modem "MHI ready" indication ===
+ *
+ * The AP tells the internal modem where the external (MHI) modem's proxy
+ * channel/event doorbells are (QMI id 0x3c).  The payload is carried as a
+ * raw byte blob (one TLV, type 0x01, [len][bytes]) because the QMI encoder's
+ * nested-struct path does not accept the vendor's variable-length struct
+ * array; the blob is byte-identical to what a userspace QMI client sent and
+ * which the modem accepted.
+ */
+#define IPA_QMI_MHI_READY_IND		0x3c	/* AP -> modem */
+#define IPA_QMI_MHI_ALLOC_CHANNEL	0x3d	/* modem -> AP request */
+
+#define IPA_MHI_CH_MAX			6
+#define IPA_MHI_CH_DESC_SZ		14	/* packed ch_init_info size */
+
+/* Per remote-MHI-channel descriptor (vendored ipa_mhi_ch_init_info_type_v01) */
+struct ipa_mhi_ch_init_info {
+	u8 ch_id;
+	u8 er_id;
+	u32 ch_doorbell_addr;
+	u32 er_doorbell_addr;
+	u32 direction;
+} __packed;
+
+struct ipa_mhi_ready_ind_msg {
+	/* NB: the QMI encoder reads QMI_DATA_LEN fields as u32 */
+	u32 payload_len;
+	u8 payload[IPA_MHI_CH_MAX * IPA_MHI_CH_DESC_SZ];
+};
+
+#define IPA_QMI_MHI_READY_IND_REQ_SZ	(5 + 3 + 1 + IPA_MHI_CH_MAX * IPA_MHI_CH_DESC_SZ)
+
+extern const struct qmi_elem_info ipa_mhi_ready_ind_msg_ei[];
+
+/* [crux 2026-10-19] 标准 QMI_IPA_MHI_READY_IND_V01 TLV 结构，
+ * 逐字对齐原厂 ipa_mhi_ready_indication_msg_v01(_ei)。
+ * 原厂用 qmi_send_indication() 发送，不等 response；此前用
+ * qmi_send_request()+qmi_txn_wait() 属语义错误。
+ */
+/* [crux 2026-10-19] 原厂 ipa_mhi_smmu_info_type_v01：4 x u64 */
+struct crux_mhi_smmu_info {
+	u64 iova_ctl_base_addr;
+	u64 iova_ctl_size;
+	u64 iova_data_base_addr;
+	u64 iova_data_size;
+} __packed;
+
+/* [crux 2026-10-19] 补齐原厂 smmu_info 可选 TLV(0x10)：
+ * 原厂 _populate_smmu_info() 只在 dev_info.smmu_enabled 时置 valid=true，
+ * 而首次发 READY_IND 时 ctrl/data 的 base/size 还全是 0（要等 0x3d 的
+ * ctrl_addr_map_info/data_addr_map_info 才填）。所以这里对齐：
+ * valid=1 + 四个 0。
+ */
+struct crux_mhi_ready_ind {
+	u32 ch_info_arr_len;
+	struct ipa_mhi_ch_init_info ch[2];
+	u8 smmu_info_valid;
+	struct crux_mhi_smmu_info smmu_info;
+} __packed;
+
+extern const struct qmi_elem_info crux_mhi_ch_desc_ei[];
+extern const struct qmi_elem_info crux_mhi_smmu_info_ei[];
+extern const struct qmi_elem_info crux_mhi_ready_ind_ei[];
+
+/* === [crux 2026-10-16] MHI_ALLOC_CHANNEL (0x3d, modem -> AP request) ===
+ *
+ * The modem asks us to allocate the external modem's MHI channels and gives
+ * us the TR/ER contexts to program.  We keep the raw payload (byte blob) so
+ * we can log and parse it.
+ */
+#define IPA_MHI_ALLOC_PAYLOAD_MAX	512
+
+struct ipa_mhi_alloc_ch_req {
+	u32 payload_len;	/* TLV 0x01: TR info array (count + elements) */
+	u8 payload[IPA_MHI_ALLOC_PAYLOAD_MAX];
+	u32 er_payload_len;	/* TLV 0x02: ER info array (count + elements) */
+	u8 er_payload[IPA_MHI_ALLOC_PAYLOAD_MAX];
+};
+
+struct ipa_mhi_alloc_ch_rsp {
+	struct qmi_response_type_v01 rsp;
+};
+
+extern const struct qmi_elem_info ipa_mhi_alloc_ch_req_ei[];
+extern const struct qmi_elem_info ipa_mhi_alloc_ch_rsp_ei[];

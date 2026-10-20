@@ -691,6 +691,16 @@ static void qrtr_ns_worker(struct work_struct *work)
 			break;
 		}
 
+		/* [crux] reject short/garbage control packets instead of parsing
+		 * beyond what the peer actually sent (zeros there used to turn
+		 * into service=0/port=0 and silently fail every announcement).
+		 */
+		if (msglen < sizeof(*pkt)) {
+			pr_warn_ratelimited("qrtr_ns: short ctrl packet %zd bytes from %d:%d\n",
+					    msglen, sq.sq_node, sq.sq_port);
+			continue;
+		}
+
 		pkt = recv_buf;
 		cmd = le32_to_cpu(pkt->cmd);
 		if (cmd < ARRAY_SIZE(qrtr_ctrl_pkt_strings) &&
@@ -742,8 +752,12 @@ static void qrtr_ns_worker(struct work_struct *work)
 		}
 
 		if (ret < 0)
-			pr_err_ratelimited("failed while handling packet from %d:%d",
-			       sq.sq_node, sq.sq_port);
+			pr_err_ratelimited("failed while handling packet from %d:%d cmd=%u len=%zd srv=%u:%u node=%u port=%u ret=%d\n",
+					   sq.sq_node, sq.sq_port, cmd, msglen,
+					   le32_to_cpu(pkt->server.service),
+					   le32_to_cpu(pkt->server.instance),
+					   le32_to_cpu(pkt->server.node),
+					   le32_to_cpu(pkt->server.port), ret);
 	}
 
 	kfree(recv_buf);

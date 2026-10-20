@@ -649,6 +649,10 @@ static const struct of_device_id ipa_match[] = {
 		.data		= &ipa_data_v3_5_1,
 	},
 	{
+		.compatible	= "qcom,sm8150-ipa",
+		.data		= &ipa_data_v4_1,
+	},
+	{
 		.compatible	= "qcom,sc7180-ipa",
 		.data		= &ipa_data_v4_2,
 	},
@@ -899,6 +903,7 @@ static int ipa_probe(struct platform_device *pdev)
 		goto done;
 
 	if (loader == IPA_LOADER_SELF) {
+
 		/* The AP is loading GSI firmware; do so now */
 		ret = ipa_firmware_load(dev);
 		if (ret)

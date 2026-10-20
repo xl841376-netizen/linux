@@ -19,11 +19,19 @@
 /* ---- slim BAM（原厂把它并进 slim@171c0000 的 reg 里，主线要独立 dma-controller 节点）---- */
 &soc {
 	slimbam: dma-controller@17184000 {
-		compatible = "qcom,bam-v1.7.0";
+		compatible = "qcom,bam-v1.7.4", "qcom,bam-v1.7.0";
 		reg = <0 0x17184000 0 0x2c000>;
+		/* crux: 与 6.17 已验证可工作配置逐项对齐（BAM 由 ADSP 远端管，不走 bam_clk）：
+		 * num-channels=31 / qcom,ee=1 / qcom,num-ees=2，且必须有 iommus（缺了会在 DMA 时
+		 * 无 SMMU 流映射 → 总线挂死，表现为启动期 RCU stall）。
+		 */
+		qcom,controlled-remotely;
+		num-channels = <31>;
+		qcom,num-ees = <2>;
 		interrupts = <GIC_SPI 164 IRQ_TYPE_LEVEL_HIGH>;
 		#dma-cells = <1>;
-		qcom,ee = <0>;
+		qcom,ee = <1>;
+		iommus = <&apps_smmu 0x1b46 0x0>;
 	};
 
 	/* ---- slim-ngd 控制器（原厂 slim@171c0000）---- */
@@ -58,6 +66,15 @@
 		};
 
 		wcd9340: codec@1,0 {
+			/* crux: 按下游 crux-audio-overlay 的 rail 映射补真实供电
+			 * (下游 cdc-vdd-buck-sido/px=pm8150_s4, cdc-vdd-ldo-rxtx=pm8150_s5)
+			 */
+			vdd-buck-supply = <&vreg_s4a_1p8>;
+			vdd-buck-sido-supply = <&vreg_s4a_1p8>;
+			vdd-io-supply = <&vreg_s4a_1p8>;
+			vdd-tx-supply = <&vreg_s5a_2p0>;
+			vdd-rx-supply = <&vreg_s5a_2p0>;
+
 			compatible = "slim217,250";
 			reg = <1 0>;
 			slim-ifc-dev = <&wcd9340_ifd>;
@@ -86,6 +103,8 @@
 			qcom,micbias2-microvolt = <1800000>;
 			qcom,micbias3-microvolt = <2700000>;
 			qcom,micbias4-microvolt = <2700000>;
+			/* [crux] 无 3.5mm 耳机口，跳过 MBHC 阻抗检测 */
+			qcom,mbhc-disabled;
 
 			#address-cells = <1>;
 			#size-cells = <1>;

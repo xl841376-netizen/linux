@@ -398,14 +398,35 @@ static void qmi_invoke_handler(struct qmi_handle *qmi, struct sockaddr_qrtr *sq,
 	if (!qmi->handlers)
 		return;
 
+	/* [crux 2026-10-16] Log any incoming QMI message that has no handler,
+	 * so we can spot modem-originated messages mainline doesn't implement
+	 * (e.g. IPA-MHI proxy / remote-IPA handshake from the internal modem).
+	 */
 	for (handler = qmi->handlers; handler->fn; handler++) {
 		if (handler->type == hdr->type &&
 		    handler->msg_id == le16_to_cpu(hdr->msg_id))
 			break;
 	}
 
-	if (!handler->fn)
+	if (!handler->fn) {
+		if (len >= sizeof(*hdr)) {
+			u16 msg_id = le16_to_cpu(hdr->msg_id);
+
+			pr_info("[crux-qmi] unhandled msg from %d:%d type=%u id=0x%04x len=%zu\n",
+				sq->sq_node, sq->sq_port, hdr->type,
+				msg_id, len);
+			/* [crux] bring-up: 原始报文也打出来，看清 modem 到底要什么 */
+			print_hex_dump(KERN_INFO, "[crux-qmi] raw: ",
+				       DUMP_PREFIX_OFFSET, 16, 1, buf,
+				       min_t(size_t, len, 256), true);
+			/* 交给 owner（通常回一个通用成功响应），
+			 * 让 modem 的 IPA 初始化流程能继续往下走。
+			 */
+			if (hdr->type == QMI_REQUEST && qmi->unhandled_req)
+				qmi->unhandled_req(qmi, sq, txn, msg_id, buf, len);
+		}
 		return;
+	}
 
 	dest = kzalloc(handler->decoded_size, GFP_KERNEL);
 	if (!dest)

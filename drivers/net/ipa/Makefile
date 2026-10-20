@@ -2,12 +2,12 @@
 #
 # Makefile for the Qualcomm IPA driver.
 
-IPA_REG_VERSIONS	:=	3.1 3.5.1 4.2 4.5 4.7 4.9 4.11 5.0 5.5
+IPA_REG_VERSIONS	:=	3.1 3.5.1 4.1 4.2 4.5 4.7 4.9 4.11 5.0 5.5
 
 # Some IPA versions can reuse another set of GSI register definitions.
 GSI_REG_VERSIONS	:=	3.1 3.5.1 4.0 4.5 4.9 4.11 5.0
 
-IPA_DATA_VERSIONS	:=	3.1 3.5.1 4.2 4.5 4.7 4.9 4.11 5.0 5.2 5.5
+IPA_DATA_VERSIONS	:=	3.1 3.5.1 4.1 4.2 4.5 4.7 4.9 4.11 5.0 5.2 5.5
 
 obj-$(CONFIG_QCOM_IPA)	+=	ipa.o
 
@@ -23,3 +23,4 @@ ipa-y			+=	$(IPA_REG_VERSIONS:%=reg/ipa_reg-v%.o)
 ipa-y			+=	$(GSI_REG_VERSIONS:%=reg/gsi_reg-v%.o)
 
 ipa-y			+=	$(IPA_DATA_VERSIONS:%=data/ipa_data-v%.o)
+obj-$(CONFIG_IPA_MHI_PROXY)	+= ipa_mhi_proxy.o
