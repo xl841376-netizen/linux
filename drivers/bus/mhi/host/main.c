@@ -12,7 +12,9 @@
 #include <linux/iommu.h>
 #include <linux/list.h>
 #include <linux/mhi.h>
+#ifdef CONFIG_CRUX_DEP
 #include <linux/crux_dep.h>
+#endif
 #include <linux/module.h>
 #include <linux/msi.h>
 #include <linux/pci.h>
@@ -1592,7 +1594,15 @@ int mhi_process_ctrl_ev_ring(struct mhi_controller *mhi_cntrl,
 					TO_MHI_EXEC_STR(mhi_cntrl->ee),
 					mhi_state_str(mhi_get_mhi_state(mhi_cntrl)));
 			}
-			/* publish EE state for consumers (see include/linux/crux_dep.h) */
+			/*
+			 * publish EE state for consumers (see include/linux/crux_dep.h)
+			 *
+			 * 必须用 CONFIG_CRUX_DEP 包住：crux_dep_set() 由
+			 * drivers/soc/qcom/crux_dep.c 提供，该文件只在
+			 * CONFIG_CRUX_DEP 打开时才被编进内核；否则这里会变成
+			 * undefined reference 导致链接失败。
+			 */
+		#ifdef CONFIG_CRUX_DEP
 			switch (event) {
 			case MHI_EE_AMSS:
 			case MHI_EE_WFW:
@@ -1611,6 +1621,7 @@ int mhi_process_ctrl_ev_ring(struct mhi_controller *mhi_cntrl,
 				crux_dep_set("x50_ee", CRUX_DEP_UNKNOWN);
 				break;
 			}
+		#endif /* CONFIG_CRUX_DEP */
 
 			if (st != DEV_ST_TRANSITION_MAX)
 				mhi_queue_state_transition(mhi_cntrl, st);
