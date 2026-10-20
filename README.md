@@ -73,6 +73,18 @@ model = "Xiaomi Mi9 Pro5G sm8150" -> 卡 id = "sm8150" // ACP 按驱动名命中
 
 ---
 
+## 2.1 交换空间（zram 默认开 / 第二块盘的 swapfile 默认关）
+
+| 组成 | 落点 | 状态 |
+|---|---|---|
+| zram 4 GiB（zstd，prio 100） | 内存压缩 | **默认启用**，不依赖任何分区 |
+| 8 GiB swapfile（prio 10） | `/mnt/lroot`（`PARTLABEL=linux-root` = `sda36` 64G） | **开关控制，默认关闭**（`/etc/crux-swap.conf` 的 `LROOT_SWAP`） |
+
+设备实测（2026-10-20）：`/dev/zram0` 4G prio 100 + `/mnt/lroot/swapfile` 8G prio 10 都在用；
+`fstab` 里有 `PARTLABEL=linux-root /mnt/lroot ext4 nofail`。仓库侧不把这套当默认，理由见 §6 的 sda36 行。
+
+---
+
 ## 3. 连机即可用的入口
 
 ```bash
@@ -137,4 +149,4 @@ ssh root@192.168.2.2          # USB ECM 备用
 | **外挂 X50 基带注册** | 未完成 | MHI / IPA 通道（`mhi_sahara`、`ipa_mhi_proxy`、`ipa_data-v4.1`）已进 `crux-sm8150-73`；QMI 侧仍卡在 SIM provisioning session（`0x38`）与注册后拖死阶段，**未通过** |
 | **Headphones / 耳机口** | 未验证 | UCM 里已移除 Headphones profile（`RX INT1/2 → HPHL/HPHR` 未见实测出声） |
 | **摄像头** | 未支持 | 无可用通路 |
-| **sda36（64G linux-root）** | 闲置 | 计划删除并入 sda37，未执行 |
+| **sda36（64G `linux-root`）** | 在用但**可选**，仓库侧默认不再依赖 | 设备上它挂在 `/mnt/lroot`，扛着 8G swapfile（另有 zram 4G，合计 12G 交换）。仓库 `crux-minimal-rootfs` 已把它改成**开关控制**：`/etc/crux-swap.conf` 的 `LROOT_SWAP=1` 才启用这 8G swapfile 与 `/mnt/lroot` 挂载，**默认 0 = 只建 zram 4G**。原因：这块盘随时可能被删除并入 sda37，不该让开机默认路径绑在它上面。本机当前仍是开着的（等价于 `LROOT_SWAP=1`）。 |
