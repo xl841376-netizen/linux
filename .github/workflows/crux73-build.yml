@@ -99,6 +99,11 @@ jobs:
           chk CONFIG_MHI_SAHARA m
           # 自研
           chk CONFIG_CRUX_DEP y
+          # 原本是 tree 外编译的 4 个驱动，现已纳入 drivers/crux 与 drivers/net/ipa
+          chk CONFIG_CRUX_ESOC m
+          chk CONFIG_MSM_NPU m
+          chk CONFIG_NPUCC_SM8150 m
+          chk CONFIG_IPA_MHI_PROXY m
           # 内嵌固件必须含 ipa_fws
           grep -q 'ipa_fws.mbn' .config || { echo "  FAIL EXTRA_FIRMWARE 缺 ipa_fws.mbn"; fail=1; }
           [ $fail = 0 ] && echo "== .config 自检通过" || { echo "== .config 自检失败（见上）"; exit 1; }
@@ -136,7 +141,8 @@ jobs:
           [ "$d" = "$KVER" ] || { echo "模块目录名 $d != $KVER"; exit 1; }
           echo "模块数: $(tar -tf "$T" | grep -c '\.ko$')"
           # 关键模块必须在
-          for m in zram.ko snd-soc-sm8150.ko snd-soc-cs35l41-i2c.ko; do
+          for m in zram.ko snd-soc-sm8150.ko snd-soc-cs35l41-i2c.ko \
+                   crux_esoc.ko msm_npu.ko npucc-sm8150.ko ipa_mhi_proxy.ko; do
             tar -tf "$T" | grep -q "$m" || { echo "缺模块 $m"; exit 1; }
           done
           echo "== 产物体检通过"

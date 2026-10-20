@@ -21,6 +21,8 @@ source "drivers/base/Kconfig"
 
 source "drivers/bus/Kconfig"
 
+source "drivers/crux/Kconfig"
+
 source "drivers/cache/Kconfig"
 
 source "drivers/connector/Kconfig"

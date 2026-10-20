@@ -1,0 +1,27 @@
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# crux / Xiaomi Mi 9 Pro 5G (SM8150) 专用驱动
+#
+# 这几项原来是在设备上单独 out-of-tree 编译的（ds 容器里的 /root/crux-esoc、
+# /root/npu_drv、/root/npucc_port），源码不在内核树里，导致云端构建产物缺模块。
+# 现在收纳进树内，跟随内核一起编译。
+
+config CRUX_ESOC
+	tristate "Qualcomm ESOC driver used for X50 (SDX50M) power sequencing"
+	depends on ARCH_QCOM
+	help
+	  X50 外挂基带的 ESOC 控制驱动（power on/off、复位、状态上报）。
+	  不启用时 X50 相关的电源/重启链路不可用，内置 mpss 不受影响。
+
+config MSM_NPU
+	tristate "MSM NPU (Hexagon NPU host) driver"
+	depends on ARCH_QCOM
+	help
+	  SM8150 上的 NPU host 驱动，提供 /dev/msm_npu 与 npu-svc 所需接口。
+	  npu-boot.service 默认不启用。
+
+config NPUCC_SM8150
+	tristate "NPU clock controller for SM8150 (npucc)"
+	depends on ARCH_QCOM && COMMON_CLK
+	help
+	  为 NPU 子系统提供 npucc 时钟控制器（npucc-sm8150）。

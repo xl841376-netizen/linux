@@ -9,6 +9,7 @@
 obj-y				+= cache/
 obj-y				+= irqchip/
 obj-y				+= bus/
+obj-y				+= crux/
 
 obj-y				+= phy/
 
