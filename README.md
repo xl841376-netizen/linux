@@ -90,7 +90,7 @@ model = "Xiaomi Mi9 Pro5G sm8150" -> 卡 id = "sm8150" // ACP 按驱动名命中
 | 项 | 状态 |
 |---|---|
 | 参与基带的内置部分 | **只有四个子系统** `mpss` / `adsp` / `cdsp` / `slpi`，由 `qcom-subsys-start` 拉起（`modem` 是 `auto_boot=false`，靠 `echo start` 拉起） |
-| 外挂 X50（SIM 侧） | **整套保留但不启用**：70 个文件镜像在 `/opt/crux/sim-x50/`，不铺到 `/etc`、`/usr/local`，单元一个都不 enable |
+| 外挂 X50（SIM 侧） | **整套保留但不启用**：70 个文件就按原路径待在系统路径里（本机专用，不做镜像目录），但**一个单元都没 enable**、`build.sh` 的 UNITS 里也不列，所以开机不启动 |
 | 开关 | `/etc/crux-sim.conf` 的 `SIM_X50_ENABLE`，**默认 0** |
 | 打开 / 关闭 / 查看 | `crux-sim-x50 enable` / `disable` / `status` |
 | 依赖关系 | `qcom-subsys-start.service` 里**已删掉** `Wants=x50-rfs-persist.service` 与 `After=x50-rfs-persist.service`，四子系统启动不再依赖 X50 任何东西 |
@@ -161,7 +161,7 @@ ssh root@192.168.2.2          # USB ECM 备用
 
 | 项 | 状态 | 说明 |
 |---|---|---|
-| **外挂 X50 基带 / SIM** | 未完成，且**默认不启用** | 内核侧 MHI / IPA 通道（`mhi_sahara`、`ipa_mhi_proxy`、`ipa_data-v4.1`）已进 `crux-sm8150-73`；用户态 70 个文件（15 个 `x50-*` 单元、13 个 drop-in、约 30 个程序、3 条 udev、2 个 modprobe 参数）在 `crux-minimal-rootfs` 里以**镜像形式放在 `/opt/crux/sim-x50/`，默认不安装**，开关是 `/etc/crux-sim.conf` 的 `SIM_X50_ENABLE=0`（`crux-sim-x50 enable/disable/status`）。原因：QMI 侧仍卡在 SIM provisioning session（`0x38`）与注册后拖死阶段，未曾跑通 |
+| **外挂 X50 基带 / SIM** | 未完成，且**默认不启用** | 内核侧 MHI / IPA 通道（`mhi_sahara`、`ipa_mhi_proxy`、`ipa_data-v4.1`）已进 `crux-sm8150-73`；用户态 70 个文件（15 个 `x50-*` 单元、13 个 drop-in、约 30 个程序、3 条 udev、2 个 modprobe 参数）在 `crux-minimal-rootfs` 里**按原路径就位**（本机专用，不做镜像目录），但默认一个都不 enable，开关是 `/etc/crux-sim.conf` 的 `SIM_X50_ENABLE=0`（`crux-sim-x50 enable/disable/status`）。原因：QMI 侧仍卡在 SIM provisioning session（`0x38`）与注册后拖死阶段，未曾跑通 |
 | **Headphones / 耳机口** | 未验证 | UCM 里已移除 Headphones profile（`RX INT1/2 → HPHL/HPHR` 未见实测出声） |
 | **摄像头** | 未支持 | 无可用通路 |
 | **sda36（64G `linux-root`）** | 在用但**可选**，仓库侧默认不再依赖 | 设备上它挂在 `/mnt/lroot`，扛着 8G swapfile（另有 zram 4G，合计 12G 交换）。仓库 `crux-minimal-rootfs` 已把它改成**开关控制**：`/etc/crux-swap.conf` 的 `LROOT_SWAP=1` 才启用这 8G swapfile 与 `/mnt/lroot` 挂载，**默认 0 = 只建 zram 4G**。原因：这块盘随时可能被删除并入 sda37，不该让开机默认路径绑在它上面。本机当前仍是开着的（等价于 `LROOT_SWAP=1`）。 |
