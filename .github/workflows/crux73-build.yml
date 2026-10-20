@@ -5,22 +5,37 @@ on:
   push:
     branches: [ crux-sm8150-73 ]
     paths:
+      # 内核本体
       - 'arch/arm64/**'
       - 'drivers/**'
       - 'include/**'
+      - 'kernel/**'
+      - 'mm/**'
+      - 'fs/**'
+      - 'net/**'
+      - 'sound/**'
+      - 'lib/**'
+      - 'scripts/**'
+      - 'init/**'
+      - 'security/**'
+      - 'crypto/**'
+      # 本机相关
+      - 'fw_extra/**'
+      - 'Kconfig*'
+      - 'Makefile'
       - '.github/workflows/crux73-build.yml'
 
 jobs:
   build:
-    # 公开仓库可用 arm64 原生 runner，与手机上的本地构建同架构，ccache 复用率更高
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 240
+    timeout-minutes: 300
     env:
       CCACHE_DIR: ${{ github.workspace }}/.ccache
       CCACHE_BASEDIR: ${{ github.workspace }}
       CCACHE_COMPRESS: "1"
       CCACHE_COMPILERCHECK: "content"
-      CCACHE_MAXSIZE: 6G
+      CCACHE_MAXSIZE: 8G
+      KVER: 7.3.0-rc5-crux73
     steps:
       - uses: actions/checkout@v4
         with:
@@ -31,9 +46,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential bc bison flex libssl-dev libelf-dev \
-            ccache gcc-aarch64-linux-gnu xz-utils rsync
+            ccache xz-utils rsync zstd cpio kmod
 
-      - name: ccache 缓存（按内核源码树分桶）
+      - name: ccache 缓存
         uses: actions/cache@v4
         with:
           path: ${{ env.CCACHE_DIR }}
@@ -41,52 +56,117 @@ jobs:
           restore-keys: |
             ccache-crux73-
 
-      - name: 校验 fw_extra（内嵌固件必须在案）
+      - name: 校验 fw_extra（EXTRA_FIRMWARE 引用的文件必须在案）
         run: |
           set -e
           fs="qcom/sdx50m/sbl1.mbn qcom/a630_sqe.fw qcom/a640_gmu.bin \
                qcom/sm8150/a640_zap.mbn qcom/sm8150/xiaomi/crux/a640_zap.mbn \
-               regulatory.db ftm5_fw.ftb qcom/sm8150/xiaomi/crux/adsp.mbn"
+               regulatory.db ftm5_fw.ftb qcom/sm8150/xiaomi/crux/adsp.mbn \
+               qcom/sm8150/xiaomi/crux/ipa_fws.mbn"
           for f in $fs; do
-            if [ ! -s "fw_extra/$f" ]; then echo "缺少固件: fw_extra/$f"; exit 1; fi
-            printf '%-52s %10s\n' "$f" "$(stat -c %s "fw_extra/$f")"
+            [ -s "fw_extra/$f" ] || { echo "缺少固件: fw_extra/$f"; exit 1; }
           done
           echo "fw_extra 合计: $(du -sh fw_extra | cut -f1)"
 
-      - name: 生成 .config
+      - name: 生成 .config（defconfig 已从设备实际配置导出，含 LOCALVERSION=-crux73）
         run: |
-          make crux73_defconfig
-          # 版本串必须与设备上已装的模块一致，否则 vermagic 不匹配、模块加载不了
-          scripts/config --disable LOCALVERSION_AUTO
-          scripts/config --set-str LOCALVERSION "-00037-g551c722f4080-dirty"
-          # 固件同样是内嵌的：fw_extra/ 里那 8 个（约 15MB）已随仓库在案，
-          # 其中 adsp.mbn 是本机拼接版（与设备 /lib/firmware 同一份）。
-          scripts/config --enable EXTRA_FIRMWARE
-          make ARCH=arm64 olddefconfig
+          set -e
+          make ARCH=arm64 crux73_defconfig
           echo "--- 关键项 ---"
-          grep -E '^CONFIG_(LOCALVERSION|EXTRA_FIRMWARE|LOCALVERSION_AUTO)' .config || true
+          grep -E '^CONFIG_(LOCALVERSION|EXTRA_FIRMWARE|ZRAM|ZSMALLOC|SND_SOC_SM8150|SND_SOC_CS35L41|MHI_SAHARA|MHI_BUS|QCOM_IPA|CRUX_DEP)=' .config || true
 
-      - name: 编译 Image.gz + dtbs
+      - name: 自检 .config（本机硬件所需的选项一个都不能少）
         run: |
-          make ARCH=arm64 CROSS_COMPILE="ccache aarch64-linux-gnu-" -j$(nproc) Image.gz dtbs
+          set -e
+          fail=0
+          chk() {  # chk CONFIG_X 期望值
+            v=$(sed -n "s/^$1=//p" .config | head -1)
+            [ "$v" = "$2" ] && printf '  OK   %-28s %s\n' "$1" "$v" \
+              || { printf '  FAIL %-28s 期望=%s 实际=%s\n' "$1" "$2" "${v:-<未设置>}"; fail=1; }
+          }
+          # 版本串：必须与 rootfs 包里 /lib/modules/<KVER> 一致
+          chk CONFIG_LOCALVERSION '"-crux73"'
+          # 音频整条链
+          chk CONFIG_SND_SOC_SM8150 m
+          chk CONFIG_SND_SOC_CS35L41 m
+          chk CONFIG_SND_SOC_CS35L41_I2C m
+          # zram（crux-swap 的 4G zram 靠它）
+          chk CONFIG_ZRAM m
+          chk CONFIG_ZSMALLOC m
+          # IPA / MHI / X50
+          chk CONFIG_QCOM_IPA y
+          chk CONFIG_MHI_BUS m
+          chk CONFIG_MHI_SAHARA m
+          # 自研
+          chk CONFIG_CRUX_DEP y
+          # 内嵌固件必须含 ipa_fws
+          grep -q 'ipa_fws.mbn' .config || { echo "  FAIL EXTRA_FIRMWARE 缺 ipa_fws.mbn"; fail=1; }
+          [ $fail = 0 ] && echo "== .config 自检通过" || { echo "== .config 自检失败（见上）"; exit 1; }
 
-      - name: ccache 统计
-        if: always()
-        run: ccache -s
+      - name: 编译（Image + dtbs + modules）
+        run: |
+          set -e
+          make ARCH=arm64 -j$(nproc) Image Image.gz dtbs modules
+          ccache -s
 
       - name: 汇总产物
         run: |
-          mkdir -p out
-          cp arch/arm64/boot/Image.gz out/
-          cp arch/arm64/boot/dts/qcom/sm8150-xiaomi-crux.dtb out/
-          ls -l out/
-          (cd out && md5sum * | tee ../out.md5)
+          set -e
+          mkdir -p out/modules
+          cp arch/arm64/boot/Image    out/Image
+          cp arch/arm64/boot/Image.gz out/Image.gz
+          cp arch/arm64/boot/dts/qcom/sm8150-xiaomi-crux.dtb out/ 2>/dev/null || true
+          # 全量 dtbs 里 sm8150/crux 相关的都带上
+          find arch/arm64/boot/dts/qcom -name 'sm8150*crux*.dtb' -exec cp {} out/ \;
+          make ARCH=arm64 INSTALL_MOD_PATH="$PWD/out/modules" modules_install
+          rm -rf out/modules/lib/modules/*/build out/modules/lib/modules/*/source
+          ( cd out/modules && tar --zstd -cf ../modules-${KVER}.tar.zst . )
+          ls -lh out/
+          ( cd out && md5sum Image Image.gz *.dtb || true ) | tee out/md5.txt
+
+      - name: 体检（产物必须自洽）
+        run: |
+          set -e
+          test -s out/Image || { echo "缺 Image"; exit 1; }
+          test -s out/sm8150-xiaomi-crux.dtb || { echo "缺 dtb"; exit 1; }
+          T=out/modules-${KVER}.tar.zst
+          test -s "$T"
+          # 模块目录名必须就是 KVER
+          d=$(tar -tf "$T" | grep -m1 "lib/modules/.*/" | cut -d/ -f3)
+          [ "$d" = "$KVER" ] || { echo "模块目录名 $d != $KVER"; exit 1; }
+          echo "模块数: $(tar -tf "$T" | grep -c '\.ko$')"
+          # 关键模块必须在
+          for m in zram.ko snd-soc-sm8150.ko snd-soc-cs35l41-i2c.ko; do
+            tar -tf "$T" | grep -q "$m" || { echo "缺模块 $m"; exit 1; }
+          done
+          echo "== 产物体检通过"
 
       - uses: actions/upload-artifact@v4
         with:
           name: crux73-kernel-${{ github.sha }}
           path: |
+            out/Image
             out/Image.gz
-            out/sm8150-xiaomi-crux.dtb
-            out.md5
+            out/*.dtb
+            out/modules-${{ env.KVER }}.tar.zst
+            out/md5.txt
           if-no-files-found: error
+
+      - name: 发 Release
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          TAG="kernel-$(date +%Y%m%d-%H%M)"
+          gh release create "$TAG" \
+            -t "crux73 kernel ${{ github.sha }} (${KVER})" \
+            -n "主线 Linux 7.3 内核（crux73_defconfig，从设备实际配置导出）。
+
+          产物：
+          - Image / Image.gz
+          - sm8150-xiaomi-crux*.dtb
+          - modules-${KVER}.tar.zst（解到 / 后即为 /lib/modules/${KVER}）
+
+          注意：KVER=${KVER} 与 crux-minimal-rootfs 包里的模块目录名一致；换版本时两边要一起改。" \
+            out/Image out/Image.gz out/*.dtb out/modules-${KVER}.tar.zst out/md5.txt
