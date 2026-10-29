@@ -126,7 +126,10 @@ int iris_vpu_boot_firmware(struct iris_core *core)
 	}
 
 	if (count >= max_tries) {
-		dev_err(core->dev, "error booting up iris firmware\n");
+		dev_err(core->dev,
+			"error booting up iris firmware (count=%u status=0x%x 0x4c=0x%x)\n",
+			count, ctrl_status,
+			readl(core->reg_base + cpu_cs_base + 0x4c));
 		return -ETIME;
 	}
 
@@ -334,9 +337,32 @@ int iris_vpu_power_on_controller(struct iris_core *core)
 	if (ret)
 		return ret;
 
-	ret = reset_control_bulk_reset(rst_tbl_size, core->resets);
-	if (ret)
-		goto err_disable_power;
+	/*
+	 * [crux] legacy VPU5(SM8150) 必须逐条 reset：assert -> 保持 150~250us -> deassert。
+	 * reset_control_bulk_reset() 是紧循环（assert+deassert 背靠背），
+	 * DSP 拿不到足够的复位保持时间，导致后面 boot_firmware 轮询 CTRL_STATUS 恒为 0
+	 * （count=1000 status=0x0 -> "error booting up iris firmware"）。
+	 * 本条来自 6.17/nabu-iris 能跑实现，7.3 主线在迁移时丢了。
+	 */
+	if (iris_vpu_uses_legacy_vpu5(core)) {
+		u32 i;
+
+		for (i = 0; i < rst_tbl_size; i++) {
+			ret = reset_control_assert(core->resets[i].rstc);
+			if (ret)
+				goto err_disable_power;
+
+			usleep_range(150, 250);
+
+			ret = reset_control_deassert(core->resets[i].rstc);
+			if (ret)
+				goto err_disable_power;
+		}
+	} else {
+		ret = reset_control_bulk_reset(rst_tbl_size, core->resets);
+		if (ret)
+			goto err_disable_power;
+	}
 
 	ret = iris_prepare_enable_clock(core, IRIS_AXI_CLK);
 	if (ret)
