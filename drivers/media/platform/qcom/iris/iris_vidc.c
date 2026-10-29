@@ -40,6 +40,72 @@ static void iris_v4l2_fh_deinit(struct iris_inst *inst, struct file *filp)
 	v4l2_fh_exit(&inst->fh);
 }
 
+/*
+ * [crux] 会话复位：把卡在 ERROR 态但仍被用户态持有的实例拉回可用状态。
+ *
+ * 流程：关闭固件侧残留会话 -> 状态复位到 DEINIT -> 清掉子状态。
+ * 之后上层可以重新走 session_open 建立新会话，用户无需 close/reopen。
+ *
+ * 只处理「仍被用户持有」的实例（fh.list 非空）。
+ * 无主的僵死实例在本函数内直接回收。
+ */
+static void iris_reset_failed_session(struct iris_inst *inst)
+{
+	const struct iris_hfi_session_ops *hfi_ops = inst->hfi_session_ops;
+
+	if (inst->state != IRIS_INST_ERROR)
+		return;
+
+	dev_warn(inst->core->dev,
+		 "[crux] session id=%#x in ERROR state, resetting for reuse\n",
+		 inst->session_id);
+
+	/* 关闭固件侧可能残留的会话，失败不阻断复位 */
+	if (hfi_ops && hfi_ops->session_close && inst->session_id)
+		hfi_ops->session_close(inst);
+
+	/* 清掉子状态，避免带着旧的 DRC/DRAIN 等标记重新进入 */
+	inst->sub_state = 0;
+	inst->once_per_session_set = false;
+
+	iris_inst_change_state(inst, IRIS_INST_DEINIT);
+}
+
+/*
+ * [crux] 访问时检查会话健康度：
+ *  - 卡在 ERROR 且无主的实例 -> 回收
+ *  - 卡在 ERROR 仍被持有的实例 -> 复位，让它能重新建立会话
+ * 返回复位/回收的数量，便于排查。
+ */
+static u32 iris_check_sessions(struct iris_core *core)
+{
+	struct iris_inst *iter, *temp;
+	u32 handled = 0;
+
+	mutex_lock(&core->lock);
+	list_for_each_entry_safe(iter, temp, &core->instances, list) {
+		if (iter->state != IRIS_INST_ERROR)
+			continue;
+
+		if (list_empty(&iter->fh.list)) {
+			/* 无主僵死实例：直接回收 */
+			dev_dbg(core->dev, "[crux] reaping dead session id=%#x\n",
+				iter->session_id);
+			list_del_init(&iter->list);
+			kfree(iter);
+		} else {
+			/* 仍被用户持有：复位以便重建会话 */
+			mutex_unlock(&core->lock);
+			iris_reset_failed_session(iter);
+			mutex_lock(&core->lock);
+		}
+		handled++;
+	}
+	mutex_unlock(&core->lock);
+
+	return handled;
+}
+
 static void iris_add_session(struct iris_inst *inst)
 {
 	struct iris_core *core = inst->core;
@@ -172,6 +238,13 @@ int iris_open(struct file *filp)
 	}
 
 	pm_runtime_put_sync(core->dev);
+
+	/*
+	 * [crux] 访问时做一次会话健康检查：
+	 *  - 无主的 ERROR 实例回收，避免占用 max_session_count 槽位
+	 *  - 仍被持有的 ERROR 实例复位到 DEINIT，使其能重新建立会话
+	 */
+	iris_check_sessions(core);
 
 	inst = core->hfi_sys_ops->sys_get_instance();
 	if (!inst)

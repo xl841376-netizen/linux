@@ -203,6 +203,23 @@ int iris_vb2_queue_setup(struct vb2_queue *q,
 		goto unlock;
 	}
 
+	/*
+	 * [crux] 会话健康检查：如果这个实例之前进入了 ERROR 态（解码/编码出错，
+	 * 固件报错等），在这里复位它，让下面的 session_open 能重新建立会话。
+	 * 否则 once_per_session_set 一旦为 true 就再也不会重建，
+	 * 用户只能 close 重开设备。
+	 */
+	if (inst->state == IRIS_INST_ERROR) {
+		dev_warn(core->dev,
+			 "[crux] session id=%#x in ERROR, resetting for reuse\n",
+			 inst->session_id);
+		if (inst->hfi_session_ops->session_close && inst->session_id)
+			inst->hfi_session_ops->session_close(inst);
+		inst->sub_state = 0;
+		inst->once_per_session_set = false;
+		iris_inst_change_state(inst, IRIS_INST_DEINIT);
+	}
+
 	ret = iris_check_session_supported(inst);
 	if (ret)
 		goto unlock;

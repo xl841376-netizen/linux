@@ -47,8 +47,20 @@ static bool iris_allow_inst_state_change(struct iris_inst *inst,
 int iris_inst_change_state(struct iris_inst *inst,
 			   enum iris_inst_state request_state)
 {
-	if (inst->state == IRIS_INST_ERROR)
+	if (inst->state == IRIS_INST_ERROR) {
+		/*
+		 * [crux] 原本这里直接 return 0，等于把 IRIS_INST_ERROR 做成单向
+		 * 终止态：实例一旦出错，即使用户态还持有 fd 也无法恢复，只能
+		 * close 重开设备。现在只放行 ERROR -> DEINIT 这一个回退转换
+		 * （供会话复位使用），其余目标状态仍然拒绝。
+		 */
+		if (request_state != IRIS_INST_DEINIT)
+			return 0;
+
+		dev_dbg(inst->core->dev, "state reset from ERROR to DEINIT\n");
+		inst->state = request_state;
 		return 0;
+	}
 
 	if (inst->state == request_state)
 		return 0;
