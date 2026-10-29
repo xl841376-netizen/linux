@@ -217,6 +217,23 @@ config BATTERY_QCOM_BATTMGR
 	  which is used on modern Qualcomm platforms to provide battery and
 	  power supply information.
 
+config BATTERY_QCOM_BATTMGR_NO_WIRELESS
+	bool "Disable wireless charging power supply (qcom-battmgr-wls)"
+	depends on BATTERY_QCOM_BATTMGR
+	help
+	  Skip registering the wireless charging power supply
+	  (qcom-battmgr-wls) in the Qualcomm PMIC GLINK battery manager.
+
+	  Useful on devices whose wireless charging coil is broken and cannot
+	  be repaired: the driver would otherwise keep emitting
+	  "failed to send synthetic uevent: -11" for a supply that can never
+	  be online.
+
+	  Only the wls power_supply is skipped; battery and USB supplies are
+	  unaffected.
+
+	  If unsure, say N.
+
 config BATTERY_OLPC
 	tristate "One Laptop Per Child battery"
 	depends on OLPC_EC

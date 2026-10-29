@@ -1215,7 +1215,8 @@ static void qcom_battmgr_notification(struct qcom_battmgr *battmgr,
 		power_supply_changed(battmgr->usb_psy);
 		break;
 	case NOTIF_WLS_PROPERTY:
-		power_supply_changed(battmgr->wls_psy);
+		if (battmgr->wls_psy)
+			power_supply_changed(battmgr->wls_psy);
 		break;
 	default:
 		dev_err(battmgr->dev, "unknown notification: %#x\n", notification);
@@ -1685,10 +1686,15 @@ static int qcom_battmgr_probe(struct auxiliary_device *adev,
 			return dev_err_probe(dev, PTR_ERR(battmgr->usb_psy),
 					     "failed to register USB power supply\n");
 
+#ifndef CONFIG_BATTERY_QCOM_BATTMGR_NO_WIRELESS
 		battmgr->wls_psy = devm_power_supply_register(dev, &sc8280xp_wls_psy_desc, &psy_cfg_supply);
 		if (IS_ERR(battmgr->wls_psy))
 			return dev_err_probe(dev, PTR_ERR(battmgr->wls_psy),
 					     "failed to register wireless charing power supply\n");
+#else
+		/* crux: 无线充电线圈硬件损坏，跳过注册，避免 -11 uevent 噪音 */
+		battmgr->wls_psy = NULL;
+#endif
 	} else {
 		if (battmgr->variant == QCOM_BATTMGR_SM8550)
 			psy_desc = &sm8550_bat_psy_desc;
@@ -1705,10 +1711,15 @@ static int qcom_battmgr_probe(struct auxiliary_device *adev,
 			return dev_err_probe(dev, PTR_ERR(battmgr->usb_psy),
 					     "failed to register USB power supply\n");
 
+#ifndef CONFIG_BATTERY_QCOM_BATTMGR_NO_WIRELESS
 		battmgr->wls_psy = devm_power_supply_register(dev, &sm8350_wls_psy_desc, &psy_cfg_supply);
 		if (IS_ERR(battmgr->wls_psy))
 			return dev_err_probe(dev, PTR_ERR(battmgr->wls_psy),
 					     "failed to register wireless charing power supply\n");
+#else
+		/* crux: 无线充电线圈硬件损坏，跳过注册，避免 -11 uevent 噪音 */
+		battmgr->wls_psy = NULL;
+#endif
 	}
 
 	ret = devm_work_autocancel(dev, &battmgr->enable_work,
