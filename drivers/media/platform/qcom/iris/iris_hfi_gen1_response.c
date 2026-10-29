@@ -265,6 +265,22 @@ iris_hfi_gen1_event_session_error(struct iris_inst *inst, struct hfi_msg_event_n
 	case HFI_ERR_SESSION_UNSUPPORT_BUFFERTYPE:
 	case HFI_ERR_SESSION_UNSUPPORTED_SETTING:
 	case HFI_ERR_SESSION_UPSCALE_NOT_SUPPORTED:
+	/*
+	 * [crux] 按原厂 vidc_hfi_helper.h 的归类，以下都是参数/状态类错误，
+	 * 原厂映射为 VIDC_ERR_BAD_PARAM / BAD_STATE / NOT_SUPPORTED，
+	 * 不当作会话致命错误。缺了这几个 case 会让固件偶发上报的
+	 * HFI_ERR_SESSION_INVALID_SESSION_ID(0x1004) 直接打死实例。
+	 */
+	case HFI_ERR_SESSION_INVALID_PARAMETER:
+	case HFI_ERR_SESSION_BAD_POINTER:
+	case HFI_ERR_SESSION_INVALID_SESSION_ID:
+	case HFI_ERR_SESSION_INVALID_STREAM_ID:
+	case HFI_ERR_SESSION_INCORRECT_STATE_OPERATION:
+	case HFI_ERR_SESSION_UNSUPPORTED_PROPERTY:
+	case HFI_ERR_SESSION_INSUFFICIENT_RESOURCES:
+	case HFI_ERR_SESSION_STREAM_CORRUPT:
+	case HFI_ERR_SESSION_UNSUPPORT_CMD:
+	case HFI_ERR_SESSION_BUFFERCOUNT_TOOSMALL:
 		dev_dbg(inst->core->dev, "session error: event id:%x, session id:%x\n",
 			pkt->event_data1, pkt->shdr.session_id);
 		break;
