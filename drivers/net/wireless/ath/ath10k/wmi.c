@@ -2662,6 +2662,15 @@ static int freq_to_idx(struct ath10k *ar, int freq)
 	struct ieee80211_supported_band *sband;
 	int band, ch, idx = 0;
 
+	/*
+	 * [crux] 固件偶尔上报 freq=0 的 chan_info 事件（无效/占位）。
+	 * 原逻辑跑完双重循环后返回 n_channels 总和(41)，刚好等于
+	 * ATH10K_NUM_CHANS，导致 "idx 41 out of bounds" 告警刷屏。
+	 * 无效频率直接返回越界值，让调用方按跳过处理。
+	 */
+	if (freq <= 0)
+		return ATH10K_NUM_CHANS;
+
 	for (band = NL80211_BAND_2GHZ; band < NUM_NL80211_BANDS; band++) {
 		sband = ar->hw->wiphy->bands[band];
 		if (!sband)
@@ -2766,8 +2775,10 @@ static void ath10k_wmi_event_chan_info_paired(struct ath10k *ar,
 
 	idx = freq_to_idx(ar, params->freq);
 	if (idx >= ARRAY_SIZE(ar->survey)) {
-		ath10k_warn(ar, "chan info: invalid frequency %d (idx %d out of bounds)\n",
-			    params->freq, idx);
+		/* [crux] 固件上报无效频率属正常噪声，降到 dbg 避免刷屏 */
+		ath10k_dbg(ar, ATH10K_DBG_REGULATORY,
+			   "chan info: invalid frequency %d (idx %d out of bounds)\n",
+			   params->freq, idx);
 		return;
 	}
 
