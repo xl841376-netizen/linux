@@ -203,7 +203,16 @@ static int iris_hfi_gen1_session_open(struct iris_inst *inst)
 	if (inst->state != IRIS_INST_DEINIT)
 		return -EALREADY;
 
-	if (inst->core->iris_platform_data->legacy_vpu5) {
+	/*
+	 * [crux] 下面这三连只做一次：首次 session_open 时初始化 codec 电源平面。
+	 * 它们修好了 SESSION_LOAD_RESOURCES 报 0x1001 的问题，但
+	 * sys_power_control(false) 会关掉 codec 电源平面，固件随之丢弃
+	 * **所有已建立会话**。若每次 open 都执行，第二次 open 之后
+	 * 旧会话再发命令就会收到 HFI_ERR_SESSION_INVALID_SESSION_ID(0x1004)。
+	 * 原厂 vidc 驱动在 session_open 路径不做电源平面控制，由 PM 单独管理。
+	 */
+	if (inst->core->iris_platform_data->legacy_vpu5 &&
+	    !inst->core->codec_power_init_done) {
 		ret = iris_hfi_gen1_sys_debug_config(inst->core);
 		if (ret)
 			return ret;
@@ -215,6 +224,8 @@ static int iris_hfi_gen1_session_open(struct iris_inst *inst)
 		ret = iris_hfi_gen1_sys_power_control(inst->core, false, false);
 		if (ret)
 			return ret;
+
+		inst->core->codec_power_init_done = true;
 	}
 
 	switch (inst->codec) {

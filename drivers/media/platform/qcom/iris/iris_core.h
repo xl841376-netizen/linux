@@ -120,6 +120,14 @@ struct iris_core {
 	struct llcc_slice_desc			*llcc_slices[2];
 	bool					llcc_active;
 	bool					syscache_set;
+	/*
+	 * [crux] codec 电源平面只在首次 session_open 时初始化一次。
+	 * 这段初始化（debug_config + syscache_config + power_control(false)）
+	 * 是修 SESSION_LOAD_RESOURCES 报 0x1001 所必需的，但 power_control(false)
+	 * 会关掉 codec 电源、让固件丢弃所有已建会话；重复执行会让旧会话的
+	 * 后续命令返回 HFI_ERR_SESSION_INVALID_SESSION_ID(0x1004)。
+	 */
+	bool					codec_power_init_done;
 	const struct iris_hfi_sys_ops		*hfi_sys_ops;
 	struct completion			core_init_done;
 	u32					intr_status;
