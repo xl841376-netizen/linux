@@ -1277,6 +1277,17 @@
 		qcom,vmid = <QCOM_SCM_VMID_MSS_MSA>;
 	};
 
+	/* [crux] 原厂 qseecom_region 是 0x9e400000+0x1400000（20MB，shared-dma-pool/
+	 * no-map），上面 3MB 给了 rmtfs(client-id=4)，剩下 0x9e700000~0x9f800000
+	 * 17MB 原厂仍归 QSEE/TrustZone，必须继续 no-map，否则内核会分配进 TZ 内存，
+	 * 指纹/keymaster/DRM 这类 TEE 调用会报 -EINVAL。
+	 */
+	qseecom_tail: memory@9e700000 {
+		compatible = "shared-dma-pool";
+		reg = <0x0 0x9e700000 0x0 0x1100000>;
+		no-map;
+	};
+
 	/* 原厂 pil_adsp_region 是 0x2200000 */
 	adsp_mem: memory@8be00000 {
 		no-map;
@@ -1764,10 +1775,22 @@
 					 PDO_FIXED_USB_COMM |
 					 PDO_FIXED_DATA_SWAP)>;
 
-		sink-pdos = <PDO_FIXED(5000, 3000,
-				       PDO_FIXED_DUAL_ROLE |
-				       PDO_FIXED_USB_COMM |
-				       PDO_FIXED_DATA_SWAP)>;
+		/* [crux 2026-10-31] 与原厂 qcom,default-sink-caps 一致：5V/3A 9V/3A 12V/2.25A。
+		 * 注意 dtc 坑：多个 PDO 不能用逗号挤在同一个 <> 里，必须各自 <>。
+		 * 原厂没有 PPS——CP 要 8.7V 得靠 PPS，这里只能先验证 PD 固定高压。
+		 */
+		sink-pdos = <PDO_FIXED(5000, 3000, PDO_FIXED_DUAL_ROLE | PDO_FIXED_USB_COMM | PDO_FIXED_DATA_SWAP)>,
+			    <PDO_FIXED(9000, 3000, PDO_FIXED_DUAL_ROLE | PDO_FIXED_USB_COMM | PDO_FIXED_DATA_SWAP)>,
+			    /* 12V 暂不声明：有 12V 时 tcpm 必选它，VBUS=12V 超出 CP 窗口 [7.9,9.1]
+			     * 且 9V/3A 与 12V/2.25A 同为 27W，去掉 12V 不影响功率，换 CP 可用。
+			     * 要恢复 12V 把下面这段注释放开即可。
+			     * <PDO_FIXED(12000, 2250, PDO_FIXED_DUAL_ROLE | PDO_FIXED_USB_COMM | PDO_FIXED_DATA_SWAP)>,
+			     */
+			    /* PPS APDO：SMB1390 固定 2:1，要 4.35V 输出就必须 VBUS=8.7V，
+			     * 只有 PPS 能连续调到这个点（固定 9V 会输出 4.5V 过充）。
+			     * 用户态入口：online=2(PPS_ONLINE) + voltage_now/current_now。
+			     */
+			    <PDO_PPS_APDO(3300, 11000, 3000)>;
 
 		op-sink-microwatt = <20000000>;
 
@@ -1870,6 +1893,13 @@
 	 * 该引脚组保留在下面做记录，改由硬件默认状态/后续方案处理。
 	 */
 	pinctrl-0 = <&qup_uart13_ctsrtsrx &qup_uart13_tx>;
+	/*
+	 * [crux 2026-10-29] 厂商 DTB 这里是 4 线 UART（gpio43/44/46 = CTS/RX/RTS，
+	 * gpio45 = TX）。之前没写 uart-has-rtscts，geni 串口就没开硬件流控，
+	 * 3.2Mbps 下会出现 hci0 Frame reassembly failed (-84) /
+	 * command tx timeout。这里是量硬件的属性，不是抵消日志。
+	 */
+	uart-has-rtscts;
 
 	bluetooth {
 		compatible = "qcom,wcn3990-bt";
@@ -2131,6 +2161,19 @@
  * 两个 PMIC 各加一份，重启后看哪个读出来是 3.x~4.4V 就是真的那路。
  * ============================================================================ */
 &pm8150b_adc {
+	/* [crux 2026-10-31] SMB1390 die_temp / ISNS
+	 * 原厂用 pm8150b vadc 的 ADC_AMUX_THM2（主/从两颗共享 temp_pin，
+	 * slave 侧把 TEMP_BUFFER 置高阻）。驱动里该通道标定方式为
+	 * SCALE_HW_CALIB_PM5_SMB_TEMP，输出 mdegC，
+	 * 公式 result = PMIC5_SMB_TEMP_CONSTANT - code*100*prescale*...
+	 */
+	channel@e {
+		reg = <ADC5_AMUX_THM2>;
+		qcom,pre-scaling = <1 1>;
+		qcom,hw-settle-time = <200>;
+		label = "smb1390_therm";
+	};
+
 	channel@84 {
 		reg = <ADC5_VBAT_SNS>;
 		qcom,pre-scaling = <1 3>;
@@ -2188,5 +2231,32 @@
 	crux_smb5: charger@1000 {
 		compatible = "crux,smb5";
 		reg = <0x1000>;
+	};
+};
+
+/* [crux] 固定 WiFi MAC：ath10k_snoc 通过 of_get_mac_address() 读 local-mac-address，
+ * 没有该属性时会打 "invalid MAC address; choosing random" 并且每次开随机变 MAC。
+ * 这里给一个本地管理（02 开头）地址，保证稳定。
+ */
+&wifi {
+	local-mac-address = [02 00 00 74 07 00];
+};
+
+/*
+ * [crux] pstore/ramoops
+ * 地址与大小来自原厂内核启动日志（minidump 分区里 strings 到的）：
+ *   ramoops: msm_reserve_ramoops_memory addr=b0000000,size=400000
+ * mainline DT 此前把它当普通 System RAM，这里按原厂预留出来。
+ */
+/ {
+	reserved-memory {
+		ramoops@b0000000 {
+			compatible = "ramoops";
+			reg = <0x0 0xb0000000 0x0 0x400000>;
+			record-size = <0x100000>;
+			console-size = <0>;
+			pmsg-size = <0>;
+			ecc-size = <0x10>;
+		};
 	};
 };
