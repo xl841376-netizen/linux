@@ -514,8 +514,45 @@ static void iris_get_int_buf_tbl(struct iris_inst *inst, u32 plane,
 		}
 	} else {
 		if (V4L2_TYPE_IS_OUTPUT(plane)) {
-			*internal_buf_type = firmware_data->enc_ip_int_buf_tbl;
-			*internal_buffer_count = firmware_data->enc_ip_int_buf_tbl_size;
+			if (inst->core->iris_platform_data->legacy_vpu5) {
+				/*
+				 * [crux] VPU5 编码器：按原厂 msm_venc_inst_init 的思路
+				 * 运行时构造内部缓冲列表，只保留固件实际声明了大小的类型。
+				 */
+				static const u32 cand[] = {
+					BUF_BIN, BUF_SCRATCH_1, BUF_SCRATCH_2,
+					BUF_PERSIST, BUF_ARP,
+				};
+				u32 i;
+
+				inst->enc_int_buf_tbl_count = 0;
+				for (i = 0; i < ARRAY_SIZE(cand); i++) {
+					if (!inst->fw_buffer_sizes[cand[i]])
+						continue;
+					inst->enc_int_buf_tbl[inst->enc_int_buf_tbl_count++] = cand[i];
+				}
+
+				dev_info(inst->core->dev,
+					 "[crux] enc intbuf: fw BIN=%u S1=%u S2=%u PERSIST=%u ARP=%u DPB=%u -> using %u\n",
+					 inst->fw_buffer_sizes[BUF_BIN],
+					 inst->fw_buffer_sizes[BUF_SCRATCH_1],
+					 inst->fw_buffer_sizes[BUF_SCRATCH_2],
+					 inst->fw_buffer_sizes[BUF_PERSIST],
+					 inst->fw_buffer_sizes[BUF_ARP],
+					 inst->fw_buffer_sizes[BUF_DPB],
+					 inst->enc_int_buf_tbl_count);
+
+				if (inst->enc_int_buf_tbl_count) {
+					*internal_buf_type = inst->enc_int_buf_tbl;
+					*internal_buffer_count = inst->enc_int_buf_tbl_count;
+				} else {
+					*internal_buf_type = firmware_data->enc_ip_int_buf_tbl;
+					*internal_buffer_count = firmware_data->enc_ip_int_buf_tbl_size;
+				}
+			} else {
+				*internal_buf_type = firmware_data->enc_ip_int_buf_tbl;
+				*internal_buffer_count = firmware_data->enc_ip_int_buf_tbl_size;
+			}
 		} else {
 			*internal_buf_type = firmware_data->enc_op_int_buf_tbl;
 			*internal_buffer_count = firmware_data->enc_op_int_buf_tbl_size;

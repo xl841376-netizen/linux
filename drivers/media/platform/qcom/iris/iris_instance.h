@@ -100,10 +100,15 @@ struct iris_inst {
 	struct platform_inst_fw_cap	fw_caps[INST_FW_CAP_MAX];
 	struct iris_buffers		buffers[BUF_TYPE_MAX];
 	u32				fw_buffer_sizes[BUF_TYPE_MAX];
+	/* [crux] 运行时构造的编码器内部缓冲列表（按原厂 msm_venc_inst_init 思路） */
+	u32				enc_int_buf_tbl[8];
+	u32				enc_int_buf_tbl_count;
 	u32				fw_min_count;
 	enum iris_inst_state		state;
 	enum iris_inst_sub_state	sub_state;
 	bool				once_per_session_set;
+	/* [crux] encoder CAPTURE 早于 OUTPUT 起流时，延迟到 OUTPUT 起流后再启动 */
+	bool				enc_delay_cap;
 	size_t				max_input_data_size;
 	struct iris_inst_power		power;
 	struct icc_vote_data		icc_data;
@@ -141,6 +146,9 @@ struct iris_inst {
 	u32				enc_raw_height;
 	u32				enc_scale_width;
 	u32				enc_scale_height;
+	/* [crux] 解码器对外报告的可见尺寸（内部仍按对齐分配） */
+	u32				dec_raw_width;
+	u32				dec_raw_height;
 	u32				hfi_layer_type;
 	u32				hfi_layer_count;
 };

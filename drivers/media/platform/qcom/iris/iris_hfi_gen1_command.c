@@ -281,6 +281,8 @@ static int iris_hfi_gen1_session_close(struct iris_inst *inst)
 
 static int iris_hfi_gen1_session_start(struct iris_inst *inst, u32 plane)
 {
+	dev_info(inst->core->dev, "IRISDBG [hfi] session_start enter plane=%u domain=%d state=%d\n",
+		 plane, inst->domain, inst->state);
 	struct iris_core *core = inst->core;
 	struct hfi_session_pkt packet;
 	int ret;

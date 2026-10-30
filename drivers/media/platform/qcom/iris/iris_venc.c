@@ -249,6 +249,10 @@ static int iris_venc_s_fmt_output(struct iris_inst *inst, struct v4l2_format *f)
 	inst->codec = f->fmt.pix_mp.pixelformat;
 	memcpy(f, fmt, sizeof(struct v4l2_format));
 
+	/* [crux] 同上：报可见尺寸，内部保留对齐值 */
+	f->fmt.pix_mp.width = inst->enc_scale_width;
+	f->fmt.pix_mp.height = inst->enc_scale_height;
+
 	return 0;
 }
 
@@ -302,6 +306,16 @@ static int iris_venc_s_fmt_input(struct iris_inst *inst, struct v4l2_format *f)
 	}
 
 	memcpy(f, fmt, sizeof(struct v4l2_format));
+
+	/*
+	 * [crux] 不把内部对齐后的尺寸报给用户：内部仍按 ALIGN(32) 工作（固件要求），
+	 * ioctl 返回用户请求的可见尺寸。V4L2 允许返回对齐值，但 ffmpeg 的
+	 * v4l2_m2m 会严格按返回值准备源帧，720→736 的隐式放大会让它在
+	 * memcpy 时越界（实测 SIGSEGV）。sizeimage 仍按对齐计算，
+	 * 所以按可见尺寸填帧的应用是安全的。
+	 */
+	f->fmt.pix_mp.width = inst->enc_raw_width;
+	f->fmt.pix_mp.height = inst->enc_raw_height;
 
 	return 0;
 }
@@ -465,29 +479,40 @@ int iris_venc_streamon_input(struct iris_inst *inst)
 {
 	int ret;
 
+	dev_info(inst->core->dev, "IRISDBG [enc] step0 enter venc_streamon_input\n");
+
 	ret = iris_set_properties(inst, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE);
+	dev_info(inst->core->dev, "IRISDBG [enc] step1 set_properties ret=%d\n", ret);
 	if (ret)
 		return ret;
 
 	ret = iris_alloc_and_queue_persist_bufs(inst, BUF_ARP);
+	dev_info(inst->core->dev, "IRISDBG [enc] step2 alloc_persist(ARP) ret=%d\n", ret);
 	if (ret)
 		return ret;
 
 	iris_get_internal_buffers(inst, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE);
+	dev_info(inst->core->dev, "IRISDBG [enc] step3 get_internal_buffers done\n");
 
 	ret = iris_destroy_dequeued_internal_buffers(inst, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE);
+	dev_info(inst->core->dev, "IRISDBG [enc] step4 destroy_dequeued ret=%d\n", ret);
 	if (ret)
 		return ret;
 
 	ret = iris_create_internal_buffers(inst, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE);
+	dev_info(inst->core->dev, "IRISDBG [enc] step5 create_internal ret=%d\n", ret);
 	if (ret)
 		return ret;
 
 	ret = iris_queue_internal_buffers(inst, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE);
+	dev_info(inst->core->dev, "IRISDBG [enc] step6 queue_internal ret=%d\n", ret);
 	if (ret)
 		return ret;
 
-	return iris_process_streamon_input(inst);
+	dev_info(inst->core->dev, "IRISDBG [enc] step7 calling process_streamon_input\n");
+	ret = iris_process_streamon_input(inst);
+	dev_info(inst->core->dev, "IRISDBG [enc] step8 process_streamon_input ret=%d\n", ret);
+	return ret;
 }
 
 int iris_venc_streamon_output(struct iris_inst *inst)
@@ -543,7 +568,12 @@ int iris_venc_qbuf(struct iris_inst *inst, struct vb2_v4l2_buffer *vbuf)
 		iris_set_ts_metadata(inst, vbuf);
 
 	q = v4l2_m2m_get_vq(inst->m2m_ctx, vb2->type);
-	if (!vb2_is_streaming(q)) {
+	/*
+	 * [crux] CAPTURE 被延迟启动期间，它的 buffer 也不能提前发给固件，
+	 * 否则固件侧还没 session_start(OUTPUT) 就收到输出缓冲。
+	 */
+	if (!vb2_is_streaming(q) ||
+	    (inst->enc_delay_cap && buf->type == BUF_OUTPUT)) {
 		buf->attr |= BUF_ATTR_DEFERRED;
 		return 0;
 	}

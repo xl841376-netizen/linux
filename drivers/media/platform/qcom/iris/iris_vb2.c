@@ -256,6 +256,32 @@ unlock:
 	return ret;
 }
 
+/*
+ * [crux] 编码器 CAPTURE 是否需要在 OUTPUT 起流之后再启动
+ *
+ * 实测：CAPTURE 先 STREAMON 时驱动会返回 0 并把固件拉起来，但 venc 固件需要
+ * INPUT 先行，于是第一帧处理阶段直接挂死 → 看门狗复位整机。
+ * 这里不再返回错误，而是让上层"看起来成功"、实际延后：
+ * 等 OUTPUT 队列开始 streaming 时再补启动 CAPTURE（见 start_streaming 尾部）。
+ */
+static bool iris_streamon_needs_delay(struct iris_inst *inst, struct vb2_queue *q)
+{
+	struct vb2_queue *peer;
+
+	if (!V4L2_TYPE_IS_CAPTURE(q->type))
+		return false;
+
+	if (inst->domain != ENCODER)
+		return false;
+
+	peer = v4l2_m2m_get_vq(inst->fh.m2m_ctx,
+			       V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE);
+	if (!peer)
+		return false;
+
+	return !peer->streaming;
+}
+
 int iris_vb2_start_streaming(struct vb2_queue *q, unsigned int count)
 {
 	enum iris_buffer_type buf_type;
@@ -282,6 +308,18 @@ int iris_vb2_start_streaming(struct vb2_queue *q, unsigned int count)
 	if (ret)
 		goto error;
 
+	/*
+	 * [crux] 编码器 CAPTURE 先于 OUTPUT 起流：不当场发固件命令，
+	 * 改为延迟标记，等 OUTPUT 开始 streaming 时再补启动。
+	 */
+	if (iris_streamon_needs_delay(inst, q)) {
+		dev_info(inst->core->dev,
+			 "[crux] delay encoder CAPTURE streamon until OUTPUT streaming\n");
+		inst->enc_delay_cap = true;
+		mutex_unlock(&inst->lock);
+		return 0;
+	}
+
 	if (V4L2_TYPE_IS_OUTPUT(q->type)) {
 		if (inst->domain == DECODER)
 			ret = iris_vdec_streamon_input(inst);
@@ -293,6 +331,16 @@ int iris_vb2_start_streaming(struct vb2_queue *q, unsigned int count)
 		else
 			ret = iris_venc_streamon_output(inst);
 	}
+
+	/* [crux] 补启动之前被延迟的 encoder CAPTURE */
+	if (!ret && V4L2_TYPE_IS_OUTPUT(q->type) &&
+	    inst->domain == ENCODER && inst->enc_delay_cap) {
+		inst->enc_delay_cap = false;
+		dev_info(inst->core->dev,
+			 "[crux] lazy-start encoder CAPTURE after OUTPUT streaming\n");
+		ret = iris_venc_streamon_output(inst);
+	}
+
 	if (ret)
 		goto error;
 
@@ -337,6 +385,9 @@ void iris_vb2_stop_streaming(struct vb2_queue *q)
 
 	inst = vb2_get_drv_priv(q);
 
+	if (V4L2_TYPE_IS_CAPTURE(q->type))
+		inst->enc_delay_cap = false;
+
 	if (V4L2_TYPE_IS_CAPTURE(q->type) && inst->state == IRIS_INST_INIT)
 		return;
 
@@ -370,6 +421,18 @@ int iris_vb2_buf_prepare(struct vb2_buffer *vb)
 			vbuf->field = V4L2_FIELD_NONE;
 		if (vbuf->field != V4L2_FIELD_NONE)
 			return -EINVAL;
+	}
+
+	/*
+	 * [crux] 拒绝空帧：OUTPUT 队列收到 bytesused=0 的帧时，VPU5 固件会
+	 * 直接挂死并触发整机复位（实测 gst v4l2h264enc 与裸 V4L2 都能复现）。
+	 * 按 V4L2 语义这里返回 -EINVAL，让应用层感知错误而不是拖垮整机。
+	 */
+	if (vb->type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE &&
+	    vb2_get_plane_payload(vb, 0) == 0) {
+		dev_err(inst->core->dev,
+			"[crux] reject empty input frame (bytesused=0)\n");
+		return -EINVAL;
 	}
 
 	if (!(inst->sub_state & IRIS_INST_SUB_DRC)) {

@@ -367,6 +367,9 @@ int iris_vdec_s_fmt(struct iris_inst *inst, struct v4l2_format *f)
 		fmt->type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
 		fmt->fmt.pix_mp.pixelformat = f->fmt.pix_mp.pixelformat;
 		inst->codec = fmt->fmt.pix_mp.pixelformat;
+		/* [crux] 记住用户请求的码流分辨率，对外照原样报回去 */
+		inst->dec_raw_width = f->fmt.pix_mp.width;
+		inst->dec_raw_height = f->fmt.pix_mp.height;
 		codec_align = inst->codec == V4L2_PIX_FMT_HEVC ? 32 : 16;
 		fmt->fmt.pix_mp.width = ALIGN(f->fmt.pix_mp.width, codec_align);
 		fmt->fmt.pix_mp.height = ALIGN(f->fmt.pix_mp.height, codec_align);
@@ -444,6 +447,23 @@ int iris_vdec_s_fmt(struct iris_inst *inst, struct v4l2_format *f)
 		return -EINVAL;
 	}
 	memcpy(f, fmt, sizeof(*fmt));
+
+	/*
+	 * [crux] 内部对齐、对外报真实尺寸：
+	 * sizeimage / bytesperline 仍按对齐值给足，可见宽高报真实值，
+	 * 避免 ffmpeg 之类按返回值准备帧却与内部对齐不一致而越界。
+	 */
+	if (V4L2_TYPE_IS_OUTPUT(f->type)) {
+		if (inst->dec_raw_width && inst->dec_raw_height) {
+			f->fmt.pix_mp.width = inst->dec_raw_width;
+			f->fmt.pix_mp.height = inst->dec_raw_height;
+		}
+	} else if (V4L2_TYPE_IS_CAPTURE(f->type)) {
+		if (inst->crop.width && inst->crop.height) {
+			f->fmt.pix_mp.width = inst->crop.width;
+			f->fmt.pix_mp.height = inst->crop.height;
+		}
+	}
 
 	return 0;
 }

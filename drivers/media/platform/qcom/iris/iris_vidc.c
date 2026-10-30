@@ -459,6 +459,36 @@ static int iris_g_fmt_vid_mplane(struct file *filp, void *fh, struct v4l2_format
 	else
 		ret = -EINVAL;
 
+	/*
+	 * [crux] G_FMT 也报可见尺寸（见 iris_venc_s_fmt_* 的说明）：
+	 * ffmpeg 的 v4l2_m2m 会在 S_FMT 后回读 G_FMT，若这里返回内部
+	 * 对齐值（720→736），它就会按 736 准备源帧并越界崩溃。
+	 */
+	if (!ret && inst->domain == ENCODER) {
+		if (V4L2_TYPE_IS_OUTPUT(f->type)) {
+			f->fmt.pix_mp.width = inst->enc_raw_width;
+			f->fmt.pix_mp.height = inst->enc_raw_height;
+		} else if (V4L2_TYPE_IS_CAPTURE(f->type)) {
+			f->fmt.pix_mp.width = inst->enc_scale_width;
+			f->fmt.pix_mp.height = inst->enc_scale_height;
+		}
+	}
+
+	/* [crux] 解码器同样：OUTPUT 报请求的码流分辨率，CAPTURE 报真实解码尺寸 */
+	if (!ret && inst->domain == DECODER) {
+		if (V4L2_TYPE_IS_OUTPUT(f->type)) {
+			if (inst->dec_raw_width && inst->dec_raw_height) {
+				f->fmt.pix_mp.width = inst->dec_raw_width;
+				f->fmt.pix_mp.height = inst->dec_raw_height;
+			}
+		} else if (V4L2_TYPE_IS_CAPTURE(f->type)) {
+			if (inst->crop.width && inst->crop.height) {
+				f->fmt.pix_mp.width = inst->crop.width;
+				f->fmt.pix_mp.height = inst->crop.height;
+			}
+		}
+	}
+
 	mutex_unlock(&inst->lock);
 
 	return ret;
@@ -750,6 +780,86 @@ static const struct vb2_ops iris_vb2_ops = {
 	.buf_queue                      = iris_vb2_buf_queue,
 };
 
+
+/*
+ * [crux] EXPBUF 安全检查
+ *
+ * 背景：SM8150 legacy VPU5 上，编码器的 CAPTURE 缓冲一旦被 VIDIOC_EXPBUF
+ * 导出成 dmabuf，紧接着起流就会让固件/IOMMU 映射冲突，整机掉电复位
+ * （裸 V4L2 单 fd + 仅 EXPBUF 已实测复现；gst 的 v4l2h264enc 正是每帧导出，
+ * 所以它一跑就重启）。
+ *
+ * 规则：能确认安全的放行，不能确认安全的拦下并返回明确错误码，
+ *       让上层（gst 等）自行退回 mmap 拷贝路径，而不是拖垮整机。
+ */
+static int iris_check_expbuf(struct file *filp, struct v4l2_exportbuffer *eb)
+{
+	struct iris_inst *inst = iris_get_inst(filp);
+	struct vb2_queue *vq;
+	struct vb2_buffer *vb;
+
+	if (!inst || !inst->fh.m2m_ctx)
+		return -EINVAL;
+
+	if (eb->type != V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE &&
+	    eb->type != V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE)
+		return -EINVAL;
+
+	/*
+	 * legacy VPU5 编码器 CAPTURE 缓冲导出 → 起流必定复位，拦下。
+	 *
+	 * [crux] EXPBUF 探测也必须拿到 -ENOTTY：
+	 * GStreamer 会用 index=0xffffffff 的假参数做一次 EXPBUF 探测，
+	 * 靠返回值区分“驱动不支持”(ENOTTY) 与“驱动支持但参数错”(EINVAL)。
+	 * 若探测拿到 EINVAL，它会认定可导出，后面真导出被拦时
+	 * buffer pool 激活就会失败。所以本判定必须放在 index/plane 校验之前。
+	 */
+	if (inst->domain == ENCODER &&
+	    V4L2_TYPE_IS_CAPTURE(eb->type) &&
+	    inst->core->iris_platform_data->legacy_vpu5)
+		return -ENOTTY;
+
+	vq = v4l2_m2m_get_vq(inst->fh.m2m_ctx, eb->type);
+	if (!vq)
+		return -EINVAL;
+
+	/* index 越界时 vb2_get_buffer() 直接返回 NULL */
+	vb = vb2_get_buffer(vq, eb->index);
+	if (!vb)
+		return -EINVAL;
+
+	if (eb->plane >= vb->num_planes)
+		return -EINVAL;
+
+	/* 已入队/正在被硬件使用：导出会破坏 vb2 与固件的缓冲状态 */
+	if (vb->state == VB2_BUF_STATE_QUEUED ||
+	    vb->state == VB2_BUF_STATE_ACTIVE)
+		return -EBUSY;
+
+	/* 已经起流：拒绝再改缓冲的外部视图 */
+	if (vq->streaming)
+		return -EBUSY;
+
+
+	/* 其余情况（OUTPUT 队列、解码器）未发现该冲突，放行 */
+	return 0;
+}
+
+static int iris_expbuf(struct file *filp, void *fh, struct v4l2_exportbuffer *eb)
+{
+	struct iris_inst *inst = iris_get_inst(filp);
+	int ret = iris_check_expbuf(filp, eb);
+
+	if (ret) {
+		dev_warn(inst->core->dev,
+			 "[crux] EXPBUF blocked: type=%u index=%u plane=%u -> %d\n",
+			 eb->type, eb->index, eb->plane, ret);
+		return ret;
+	}
+
+	return v4l2_m2m_ioctl_expbuf(filp, fh, eb);
+}
+
 static const struct v4l2_ioctl_ops iris_v4l2_ioctl_ops_dec = {
 	.vidioc_enum_fmt_vid_cap        = iris_enum_fmt,
 	.vidioc_enum_fmt_vid_out        = iris_enum_fmt,
@@ -764,7 +874,7 @@ static const struct v4l2_ioctl_ops iris_v4l2_ioctl_ops_dec = {
 	.vidioc_querybuf                = v4l2_m2m_ioctl_querybuf,
 	.vidioc_create_bufs             = v4l2_m2m_ioctl_create_bufs,
 	.vidioc_prepare_buf             = v4l2_m2m_ioctl_prepare_buf,
-	.vidioc_expbuf                  = v4l2_m2m_ioctl_expbuf,
+	.vidioc_expbuf                  = iris_expbuf,
 	.vidioc_qbuf                    = v4l2_m2m_ioctl_qbuf,
 	.vidioc_dqbuf                   = v4l2_m2m_ioctl_dqbuf,
 	.vidioc_remove_bufs             = v4l2_m2m_ioctl_remove_bufs,
@@ -802,7 +912,7 @@ static const struct v4l2_ioctl_ops iris_v4l2_ioctl_ops_enc = {
 	.vidioc_querybuf                = v4l2_m2m_ioctl_querybuf,
 	.vidioc_create_bufs             = v4l2_m2m_ioctl_create_bufs,
 	.vidioc_prepare_buf             = v4l2_m2m_ioctl_prepare_buf,
-	.vidioc_expbuf                  = v4l2_m2m_ioctl_expbuf,
+	.vidioc_expbuf                  = iris_expbuf,
 	.vidioc_qbuf                    = v4l2_m2m_ioctl_qbuf,
 	.vidioc_dqbuf                   = v4l2_m2m_ioctl_dqbuf,
 	.vidioc_remove_bufs             = v4l2_m2m_ioctl_remove_bufs,

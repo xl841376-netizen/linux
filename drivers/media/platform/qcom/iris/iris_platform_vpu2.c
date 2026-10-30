@@ -66,9 +66,9 @@ static struct platform_inst_caps platform_inst_cap_vpu2 = {
 };
 
 static struct platform_inst_caps platform_inst_cap_sm8150 = {
-	.min_frame_width = 128,
+	.min_frame_width = 96,
 	.max_frame_width = 8192,
-	.min_frame_height = 128,
+	.min_frame_height = 96,
 	.max_frame_height = 8192,
 	.max_mbpf = 138240,
 	.mb_cycles_vsp = 10,
