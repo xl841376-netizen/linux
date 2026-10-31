@@ -179,6 +179,7 @@ struct crux_smb5 {
 	int			last_status;
 	int			last_jeita_stage;
 	bool			digital_temp_over;	/* PMIC 温度范围超限 */
+	u32			pd_icl_ua;	/* 已下发的 PD 联动 ICL，0=未同步 */
 };
 
 /* ------------------------------------------------ 通用参数编解码（参数表化） */
@@ -562,14 +563,12 @@ static void crux_update_allowance(struct crux_smb5 *chg)
 	if (uv < 0)
 		return;
 
-	if (uv >= 11000000 && uv <= 13000000)
-		want = ALLOW_FORCE_12V;
-	else if (uv >= 8500000 && uv < 11000000)
-		want = ALLOW_FORCE_9V;
-	else if (uv >= 4800000 && uv < 5500000)
-		want = ALLOW_FORCE_5V;
-	else
-		want = ALLOW_CONTINUOUS;
+	/*
+	 * 固定 CONTINUOUS：允许适配器输出任意合法电压。
+	 * 之前按"当前 VBUS"分档写 FORCE_5V，会与 tcpm 的 PD 协商互相锁死：
+	 * tcpm 想升 9V -> SMB5 只允许 5V -> VBUS 被拒 -> tcpm 退回 5V -> 永远 5V。
+	 */
+	want = ALLOW_CONTINUOUS;
 
 	if (regmap_read(chg->regmap, USBIN_ADAPTER_ALLOW_OVERRIDE_REG, &cur))
 		return;
@@ -584,6 +583,69 @@ static void crux_update_allowance(struct crux_smb5 *chg)
 			 uv, cur & 0x0f, want);
 }
 
+/*
+ * PD 合同 -> ICL 联动（补上原厂 smblib_get_charge_current() 的 PD_VOTER）
+ *
+ * 原厂逻辑：PD 建立后总输入预算 = PD_VOTER 投的 ICL（= PD 合同电流），
+ * 而不是 dts 里的默认 1.2A。mainline 这版 crux_smb5 没有这个投票链，
+ * 结果 PD 协商到 9V/3A 了、ICL 还停在 1.2A -> 只有 10.8W。
+ *
+ * 这里按 poll 周期从 typec 的 usb-psy 读源声明的最大电流（PD 合同后 = 3A），
+ * 夹在 [CRUX_ICL_MIN_UA, CRUX_ICL_MAX_UA] 再下发给 USBIN_CURRENT_LIMIT_CFG。
+ */
+#define CRUX_ICL_MAX_UA		3000000u	/* PD 3A 合同上限 */
+#define CRUX_ICL_MIN_UA		1200000u	/* 低于此值撑不住系统负载 */
+#define CRUX_ICL_5V_UA		1200000u	/* 拿不到源能力时的兜底 */
+
+static void crux_pd_icl_sync(struct crux_smb5 *chg)
+{
+	static const char *const names[] = {
+		"usb",
+		"tcpm-source-psy-c440000.spmi:pmic@2:typec@1500",
+	};
+	union power_supply_propval pc = {0, };
+	struct power_supply *psy;
+	u32 want = 0;
+	int i, rc;
+
+	if (!crux_input_online(chg)) {
+		chg->pd_icl_ua = 0;
+		return;
+	}
+
+	for (i = 0; i < ARRAY_SIZE(names); i++) {
+		psy = power_supply_get_by_name(names[i]);
+		if (!psy)
+			continue;
+		/* CURRENT_MAX = 源声明上限；PD 合同后 tcpm 会把它更新为合同电流 */
+		rc = power_supply_get_property(psy, POWER_SUPPLY_PROP_CURRENT_MAX, &pc);
+		if (rc || pc.intval <= 0)
+			rc = power_supply_get_property(psy, POWER_SUPPLY_PROP_CURRENT_NOW, &pc);
+		power_supply_put(psy);
+		if (!rc && pc.intval > 0) {
+			want = pc.intval;
+			break;
+		}
+	}
+
+	if (!want)
+		want = CRUX_ICL_5V_UA;
+	if (want > CRUX_ICL_MAX_UA)
+		want = CRUX_ICL_MAX_UA;
+	if (want < CRUX_ICL_MIN_UA)
+		want = CRUX_ICL_MIN_UA;
+	if (want == chg->pd_icl_ua)
+		return;
+
+	if (crux_param_write(chg, &crux_icl, want)) {
+		dev_err(chg->dev, "pd_icl: write %u uA failed\n", want);
+		return;
+	}
+	chg->pd_icl_ua = want;
+	dev_info(chg->dev, "pd_icl: source wants %u mA -> icl set %u mA\n",
+		 want / 1000, want / 1000);
+}
+
 static void crux_smb5_poll(struct work_struct *work)
 {
 	struct crux_smb5 *chg = container_of(to_delayed_work(work),
@@ -592,6 +654,7 @@ static void crux_smb5_poll(struct work_struct *work)
 	int status = crux_charger_status(chg);
 
 	crux_update_allowance(chg);
+	crux_pd_icl_sync(chg);
 	crux_check_pmic_temp(chg);
 	crux_jeita_apply(chg);
 
