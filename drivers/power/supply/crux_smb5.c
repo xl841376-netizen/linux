@@ -263,9 +263,6 @@ static int crux_charger_status(struct crux_smb5 *chg)
 	if (regmap_read(chg->regmap, BATTERY_CHARGER_STATUS_1, &stat))
 		return POWER_SUPPLY_STATUS_UNKNOWN;
 
-	/* PMIC 温度范围超限时，我们已主动停充 */
-	if (chg->digital_temp_over)
-		return POWER_SUPPLY_STATUS_NOT_CHARGING;
 
 	switch (stat & BATTERY_CHARGER_STATUS_MASK) {
 	case INHIBIT_CHARGE:
@@ -501,25 +498,24 @@ static void crux_jeita_apply(struct crux_smb5 *chg)
 static void crux_check_pmic_temp(struct crux_smb5 *chg)
 {
 	unsigned int v;
-	bool over;
 
+	/*
+	 * 0x1670 MISC_THERMREG_SRC_CFG 从未配置时，TEMP_RANGE_STATUS(0x1606)
+	 * 的 ABOVE 位不可靠（实测 die_temp 42.7C 仍报 ABOVE 并来回抖动）。
+	 * 这里只记录、不做任何动作：真过温由 PM8150B 硬件 TSD 自动保护。
+	 * 之前一置位就关 CHARGING_ENABLE，会让输入电流归零，进而诱发
+	 * 充电宝小电流自动关断 -> VBUS 消失 -> 硬复位。
+	 */
 	if (regmap_read(chg->regmap, TEMP_RANGE_STATUS_REG, &v))
 		return;
 
-	over = !!(v & TEMP_ABOVE_RANGE_BIT);
-	if (over == chg->digital_temp_over)
-		return;
-
-	chg->digital_temp_over = over;
-	dev_warn(chg->dev, "PMIC temp range: %s\n",
-		 over ? "ABOVE (inhibit charging)" : "back within range");
-
-	if (over)
-		regmap_update_bits(chg->regmap, CHARGING_ENABLE_CMD, BIT(0), 0);
-	else
-		regmap_update_bits(chg->regmap, CHARGING_ENABLE_CMD, BIT(0), BIT(0));
-
-	power_supply_changed(chg->psy);
+	if (!!(v & TEMP_ABOVE_RANGE_BIT) && !chg->digital_temp_over) {
+		chg->digital_temp_over = true;
+		dev_warn(chg->dev, "PMIC temp range: ABOVE (log only, no action)\n");
+	} else if (!(v & TEMP_ABOVE_RANGE_BIT) && chg->digital_temp_over) {
+		chg->digital_temp_over = false;
+		dev_warn(chg->dev, "PMIC temp range: back within range\n");
+	}
 }
 
 /* -------------------------------------------------------------- 轮询 */
