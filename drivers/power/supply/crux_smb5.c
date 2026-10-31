@@ -634,8 +634,21 @@ static void crux_pd_icl_sync(struct crux_smb5 *chg)
 		want = CRUX_ICL_MAX_UA;
 	if (want < CRUX_ICL_MIN_UA)
 		want = CRUX_ICL_MIN_UA;
-	if (want == chg->pd_icl_ua)
+	if (want == chg->pd_icl_ua) {
+		u32 actual = 0;
+
+		/*
+		 * 合同没变：只保证不超过合同值（上限保护）。
+		 * 若 ICL 被用户态主动压低（battery 插件满电/高温降流、
+		 * 手动写入等），这里尊重，不抢回去。
+		 */
+		if (!crux_param_read(chg, &crux_icl, &actual) && actual > want) {
+			crux_param_write(chg, &crux_icl, want);
+			dev_info(chg->dev, "pd_icl: clamp %u -> %u mA\n",
+				 actual / 1000, want / 1000);
+		}
 		return;
+	}
 
 	if (crux_param_write(chg, &crux_icl, want)) {
 		dev_err(chg->dev, "pd_icl: write %u uA failed\n", want);
