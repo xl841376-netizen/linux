@@ -55,6 +55,14 @@ EXPORT_SYMBOL_GPL(crux_ipa_reg_phys);
 
 static struct ipa *crux_ipa_inst;
 
+/* crux: 给外挂模块（ipa_mhi_proxy.ko）用的访问器 */
+struct ipa *crux_ipa_instance(void)
+{
+	return crux_ipa_inst;
+}
+EXPORT_SYMBOL_GPL(crux_ipa_instance);
+
+
 /* [crux 2026-10-19] 原厂 IPA_ACTIVE_CLIENTS_INC_SPECIAL("IMP") 的等价物：
  * 任何碰 IPA/GSI 寄存器或 uC 共享内存之前，必须先让 IPA 时钟/电源起来，
  * 否则会在 runtime suspend 状态下访存 → 总线错误 → 整机复位（已实测）。
@@ -508,6 +516,44 @@ static int crux_uc_map_doorbell_identity(struct ipa *ipa, u32 addr)
 
 	return 0;
 }
+
+/**
+ * crux_ipa_mhi_map_ring() - 把 modem 提供的环 identity-map 进 IPA 的 iommu domain
+ * @iova: 环的设备地址（modem 视角）
+ * @size: 环大小（字节）
+ *
+ * 原厂在 ipa3_connect_mhi_pipe 之前对 MHI 的环做同样的映射；没有这一步，
+ * GSI 启动后访问环会 SMMU fault。
+ */
+int crux_ipa_mhi_map_ring(u32 iova, u32 size)
+{
+	struct iommu_domain *domain;
+	dma_addr_t start = (dma_addr_t)(iova & PAGE_MASK);
+	size_t len = PAGE_ALIGN((iova & ~PAGE_MASK) + size);
+	phys_addr_t mapped;
+	int ret;
+
+	if (!crux_ipa_inst)
+		return -ENODEV;
+
+	domain = iommu_get_domain_for_dev(crux_ipa_inst->dev);
+	if (!domain)
+		return -ENODEV;
+
+	mapped = iommu_iova_to_phys(domain, start);
+	if (mapped == (phys_addr_t)start)
+		return 0;
+
+	ret = iommu_map(domain, start, (phys_addr_t)start, len,
+			IOMMU_READ | IOMMU_WRITE | IOMMU_MMIO, GFP_KERNEL);
+	if (ret)
+		return ret;
+
+	dev_info(crux_ipa_inst->dev,
+		 "[crux] mhi ring %#x+%#x identity-mapped\n", iova, size);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(crux_ipa_mhi_map_ring);
 
 /**
  * crux_ipa_uc_send_remote_ipa_info() - 把远端 IPA（外挂基带）doorbell 登记成 uC 邮箱

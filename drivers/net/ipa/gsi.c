@@ -955,6 +955,40 @@ static int __gsi_channel_start(struct gsi_channel *channel, bool resume)
 }
 
 /* Start an allocated GSI channel */
+/* [crux 2026-11-02] 用 modem 提供的环参数启动一条已存在的 GSI 通道。
+ * 主线 gsi_channel_start() 用的是驱动自己 dma_alloc 的环；MHI 场景下环在
+ * modem 侧，只能用外部参数覆盖 tre_ring 的 addr/count 再启动。
+ */
+int crux_gsi_start_with_ring(struct gsi *gsi, u32 channel_id,
+			     dma_addr_t ring_addr, u32 ring_count,
+			     void *ring_virt, u32 evt_ring)
+{
+	struct gsi_channel *channel;
+	int ret;
+
+	if (!gsi || channel_id >= gsi->channel_count)
+		return -EINVAL;
+
+	channel = &gsi->channel[channel_id];
+	dev_info(gsi->dev,
+		 "[crux] gsi ring: chan %u old(addr=%pad cnt=%u) -> new(addr=%pad cnt=%u)\n",
+		 channel_id, &channel->tre_ring.addr, channel->tre_ring.count,
+		 &ring_addr, ring_count);
+
+	channel->tre_ring.addr = ring_addr;
+	channel->tre_ring.count = ring_count;
+	if (ring_virt)
+		channel->tre_ring.virt = ring_virt;
+	if (evt_ring < GSI_EVT_RING_COUNT_MAX)
+		channel->evt_ring_id = evt_ring;
+
+	ret = gsi_channel_start(gsi, channel_id);
+	dev_info(gsi->dev, "[crux] gsi ring: chan %u start ret=%d\n",
+		 channel_id, ret);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(crux_gsi_start_with_ring);
+
 int gsi_channel_start(struct gsi *gsi, u32 channel_id)
 {
 	struct gsi_channel *channel = &gsi->channel[channel_id];
@@ -2338,10 +2372,22 @@ static int gsi_channel_init(struct gsi *gsi, u32 count,
 		}
 
 		ret = gsi_channel_init_one(gsi, &data[i], command);
-		if (ret)
+		if (ret) {
+			dev_err(gsi->dev,
+				"[crux] gsi init: entry %u chan %u FAILED %d\n",
+				i, data[i].channel_id, ret);
 			goto err_unwind;
+		}
+		dev_info(gsi->dev,
+			 "[crux] gsi init: entry %u chan %u addr=%pad cnt=%u ee=%d\n",
+			 i, data[i].channel_id,
+			 &gsi->channel[data[i].channel_id].tre_ring.addr,
+			 gsi->channel[data[i].channel_id].tre_ring.count,
+			 data[i].ee_id);
 	}
 
+	dev_info(gsi->dev, "[crux] gsi init done: count=%u modem_bitmap=%#lx\n",
+		 count, gsi->modem_channel_bitmap);
 	return ret;
 
 err_unwind:

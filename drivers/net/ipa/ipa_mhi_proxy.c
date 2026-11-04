@@ -16,6 +16,7 @@
  * 0x3d handler is next.
  */
 #include <linux/module.h>
+#include "ipa.h"
 #include <linux/kernel.h>
 #include <linux/device.h>
 #include <linux/crux_dep.h>
@@ -127,16 +128,36 @@ static void mhi_proxy_retry(struct work_struct *work);
 
 static struct ipa_mhi_ch_init_info mhi_proxy_ch[2];
 static struct mhi_device *mhi_proxy_dev;
+static int mhi_prepared;
 
 /* [crux 2026-10-19] 前向声明：probe 里要 INIT_WORK，定义在文件后部 */
 static struct work_struct mhi_proxy_uc_stage_wk;
 static void mhi_proxy_uc_stage_worker(struct work_struct *work);
 
 static DECLARE_DELAYED_WORK(mhi_proxy_work, mhi_proxy_retry);
+static void mhi_proxy_handshake(struct work_struct *work);
+static DECLARE_DELAYED_WORK(mhi_proxy_hs_work, mhi_proxy_handshake);
 
 extern u32 crux_ipa_uc_mbox_addr(u32 m, u32 n);
 extern int crux_ipa_uc_send_remote_ipa_info(u32 remote_addr, u32 mbox_n);
 extern int crux_ipa_gsi_set_mhi_base_chan(void);
+static bool crux_connect_enable = true;   /* 默认打开（v3：驱动环 + 正确端点查找） */
+module_param(crux_connect_enable, bool, 0644);
+
+/* crux: 普通数据口（mhi_net/rmnet）路线下，proxy 必须完全避让 */
+static bool crux_proxy_enable = true;
+module_param(crux_proxy_enable, bool, 0644);
+static unsigned int crux_gsi_base = 101;   /* MHI 起始 GSI 通道 */
+static unsigned int crux_first_ch = 100;   /* modem 视角的首通道 */
+module_param(crux_gsi_base, uint, 0644);
+module_param(crux_first_ch, uint, 0644);
+extern int crux_ipa_mhi_connect(struct ipa *ipa, u32 gsi_chan, bool toward_ipa);
+extern int crux_ipa_mhi_ring(bool toward_ipa, u64 *addr, u32 *count);
+extern int crux_gsi_start_with_ring(struct gsi *gsi, u32 channel_id,
+                                   dma_addr_t ring_addr, u32 ring_count,
+                                   void *ring_virt, u32 evt_ring);
+extern int crux_ipa_mhi_map_ring(u32 iova, u32 size);
+extern struct ipa *crux_ipa_instance(void);
 extern int crux_ipa_pm_get(void);
 extern void crux_ipa_pm_put(void);
 
@@ -200,6 +221,10 @@ module_param(dl_er, uint, 0644);
  * 用来隔离「开机进桌面 5~10s 直接死机」究竟来自这两步还是别处。
  */
 static bool auto_uc = true;  /* [crux 2026-10-19] 默认开：insmod 参数在某些路径下丢失，改默认值更可靠 */
+static bool skip_ready;
+module_param(skip_ready, bool, 0644);
+MODULE_PARM_DESC(skip_ready, "skip MHI_READY_IND(0x3c)");
+
 module_param(auto_uc, bool, 0644);
 MODULE_PARM_DESC(auto_uc, "send REMOTE_IPA_INFO(0x0b)+MHI_READY_IND(0x3c) at probe (default 0)");
 
@@ -226,116 +251,246 @@ struct crux_event_ctxt {
 	__le64 wp;
 } __packed;
 
-#define TR_ENT_SZ	39	/* ch_id(1) poll_cfg(2) brst(4) iova(8) len(8) rp(8) wp(8) */
-#define ER_ENT_SZ	45	/* er_id(1) cycles(4) count(4) msi(4) iova(8) len(8) rp(8) wp(8) */
 #define CHAN_CTX_BRSTMODE_MASK	GENMASK(9, 8)
 #define CHAN_CTX_POLLCFG_MASK	GENMASK(15, 10)
 #define EV_CTX_INTMODC_MASK	GENMASK(15, 8)
 #define EV_CTX_INTMODT_MASK	GENMASK(31, 16)
 
-static const struct crux_event_ctxt *crux_find_er(const u8 *er, u32 er_len, u8 er_id)
+/* [crux 2026-10-28] 0x3d 按原厂结构解析后，配置外部 modem 的 MHI 通道上下文。
+ * 原来的手工偏移假设元素 39/45 字节，漏了编译器对齐 pad（实际 40/48），
+ * 导致整条消息错位、TLV 长度读成 26626。
+ */
+static int crux_apply_alloc(const struct ipa_mhi_alloc_ch_req *req)
 {
-	static struct crux_event_ctxt out;
-	int i, n;
+	int i, done = 0;
+	unsigned int ul_id = ul_chan, dl_id = dl_chan;
 
-	if (!er || er_len < 1)
-		return NULL;
-	n = er[0];
-	if (1 + n * ER_ENT_SZ > er_len)
-		return NULL;
-
-	for (i = 0; i < n; i++) {
-		const u8 *p = er + 1 + i * ER_ENT_SZ;
-
-		if (p[0] != er_id)
-			continue;
-		memset(&out, 0, sizeof(out));
-		out.intmod = cpu_to_le32(
-			FIELD_PREP(EV_CTX_INTMODC_MASK, get_unaligned_le32(p + 5)) |
-			FIELD_PREP(EV_CTX_INTMODT_MASK, get_unaligned_le32(p + 1)));
-		out.ertype = cpu_to_le32(1);
-		out.msivec = cpu_to_le32(get_unaligned_le32(p + 9));
-		out.rbase = cpu_to_le64(get_unaligned_le64(p + 13));
-		out.rlen = cpu_to_le64(get_unaligned_le64(p + 21));
-		out.rp = cpu_to_le64(get_unaligned_le64(p + 29));
-		out.wp = cpu_to_le64(get_unaligned_le64(p + 37));
-		return &out;
+	if (mhi_proxy_dev) {
+		if (mhi_proxy_dev->ul_chan_id >= 0)
+			ul_id = mhi_proxy_dev->ul_chan_id;
+		if (mhi_proxy_dev->dl_chan_id >= 0)
+			dl_id = mhi_proxy_dev->dl_chan_id;
 	}
-	return NULL;
-}
-
-static int crux_apply_alloc(const u8 *tr, u32 tr_len, const u8 *er, u32 er_len)
-{
-	int i, n, done = 0;
 
 	if (!mhi_proxy_dev) {
 		pr_err("[crux mhi-proxy] alloc: no mhi device yet\n");
 		return -ENODEV;
 	}
-	if (!tr || tr_len < 1)
+	if (!req || !req->tr_info_arr_len)
 		return -EINVAL;
-	n = tr[0];
-	if (1 + n * TR_ENT_SZ > tr_len) {
-		pr_err("[crux mhi-proxy] alloc: bad TR len %u (n=%d)\n", tr_len, n);
-		return -EINVAL;
-	}
 
-	for (i = 0; i < n; i++) {
-		const u8 *p = tr + 1 + i * TR_ENT_SZ;
-		u8 ch_id = p[0];
-		u16 poll = get_unaligned_le16(p + 1);
-		u32 brst = get_unaligned_le32(p + 3);
-		unsigned int er_id, dir;
+	pr_info("[crux mhi-proxy] alloc: dev_ul=%d dev_dl=%d use=%u/%u param=%u/%u sizeof_tr=%zu off_ch=%zu\n",
+		mhi_proxy_dev->ul_chan_id, mhi_proxy_dev->dl_chan_id,
+		ul_id, dl_id, ul_chan, dl_chan,
+		sizeof(struct ipa_mhi_tr_info),
+		offsetof(struct ipa_mhi_tr_info, ch_id));
+
+	for (i = 0; i < req->tr_info_arr_len && i < QMI_IPA_MHI_CH_MAX; i++) {
+		const struct ipa_mhi_tr_info *t = &req->tr_info_arr[i];
+		pr_info("[crux mhi-proxy] alloc: raw[%d] ch_id=%u(0x%02x)\n",
+			i, t->ch_id, t->ch_id);
+		const struct ipa_mhi_er_info *e = NULL;
+		unsigned int er_id, dir, k;
 		struct mhi_buf cfg[2];
 		struct crux_chan_ctxt cc;
-		const struct crux_event_ctxt *ec;
+		struct crux_event_ctxt ec;
 		int ret;
 
-		if (ch_id == ul_chan) {
+		if (t->ch_id == ul_id) {
 			er_id = ul_er;
 			dir = DMA_TO_DEVICE;
-		} else if (ch_id == dl_chan) {
+		} else if (t->ch_id == dl_id) {
 			er_id = dl_er;
 			dir = DMA_FROM_DEVICE;
 		} else {
-			pr_info("[crux mhi-proxy] alloc: skip unknown ch %u\n", ch_id);
+			pr_info("[crux mhi-proxy] alloc: skip unknown ch %u\n", t->ch_id);
 			continue;
 		}
 
-		ec = crux_find_er(er, er_len, er_id);
-		if (!ec) {
-			pr_err("[crux mhi-proxy] alloc: no ER %u for ch %u\n", er_id, ch_id);
+		for (k = 0; k < req->er_info_arr_len && k < QMI_IPA_MHI_CH_MAX; k++) {
+			if (req->er_info_arr[k].er_id == er_id) {
+				e = &req->er_info_arr[k];
+				break;
+			}
+		}
+		if (!e) {
+			pr_err("[crux mhi-proxy] alloc: no ER %u for ch %u\n",
+			       er_id, t->ch_id);
 			return -EINVAL;
 		}
 
 		memset(&cc, 0, sizeof(cc));
+		memset(&ec, 0, sizeof(ec));
 		cc.chcfg = cpu_to_le32(
-			FIELD_PREP(CHAN_CTX_BRSTMODE_MASK, brst == 1 ? 3 : (brst == 0 ? 2 : 0)) |
-			FIELD_PREP(CHAN_CTX_POLLCFG_MASK, poll));
+			FIELD_PREP(CHAN_CTX_BRSTMODE_MASK,
+				   t->brst_mode_type == 1 ? 3 :
+				   (t->brst_mode_type == 0 ? 2 : 0)) |
+			FIELD_PREP(CHAN_CTX_POLLCFG_MASK, t->poll_cfg));
 		cc.chtype = cpu_to_le32(dir);
 		cc.erindex = cpu_to_le32(er_id);
-		cc.rbase = cpu_to_le64(get_unaligned_le64(p + 7));
-		cc.rlen = cpu_to_le64(get_unaligned_le64(p + 15));
-		cc.rp = cpu_to_le64(get_unaligned_le64(p + 23));
-		cc.wp = cpu_to_le64(get_unaligned_le64(p + 31));
+		{
+			bool is_tx = (t->ch_id == ul_id);
+			u64 daddr = 0;
+			u32 dcnt = 0;
+
+			if (crux_ipa_mhi_ring(is_tx, &daddr, &dcnt) == 0) {
+				/* 用驱动侧（GSI 已初始化）的环，modem 写同一块内存 */
+				cc.rbase = cpu_to_le64(daddr);
+				cc.rlen = cpu_to_le64((u64)dcnt * 16);
+				cc.rp = cpu_to_le64(0);
+				cc.wp = cpu_to_le64(0);
+				pr_info("[crux mhi-proxy] ring: ch%u %s use drv addr=%#llx cnt=%u\n",
+					t->ch_id, is_tx ? "TX" : "RX",
+					(unsigned long long)daddr, dcnt);
+			} else {
+				/* 退路：仍用 modem 给的环 */
+				cc.rbase = cpu_to_le64(t->ring_iova);
+				cc.rlen = cpu_to_le64(t->ring_len);
+				cc.rp = cpu_to_le64(t->rp);
+				cc.wp = cpu_to_le64(t->wp);
+				pr_info("[crux mhi-proxy] ring: ch%u %s fallback modem ring=%#llx\n",
+					t->ch_id, is_tx ? "TX" : "RX",
+					(unsigned long long)t->ring_iova);
+			}
+		}
+
+		ec.intmod = cpu_to_le32(
+			FIELD_PREP(EV_CTX_INTMODC_MASK, e->intmod_cycles) |
+			FIELD_PREP(EV_CTX_INTMODT_MASK, e->intmod_count));
+		ec.ertype = cpu_to_le32(1);
+		ec.msivec = cpu_to_le32(e->msi_addr);
+		ec.rbase = cpu_to_le64(e->ring_iova);
+		ec.rlen = cpu_to_le64(e->ring_len);
+		ec.rp = cpu_to_le64(e->rp);
+		ec.wp = cpu_to_le64(e->wp);
 
 		cfg[0].buf = (void *)&cc;
 		cfg[0].len = sizeof(cc);
 		cfg[0].name = "CCA";
-		cfg[1].buf = (void *)ec;
-		cfg[1].len = sizeof(*ec);
+		cfg[1].buf = (void *)&ec;
+		cfg[1].len = sizeof(ec);
 		cfg[1].name = "ECA";
 
 		ret = mhi_device_configure(mhi_proxy_dev, dir, cfg, 2);
 		pr_info("[crux mhi-proxy] alloc: ch%u dir%u er%u configure ret=%d\n",
-			ch_id, dir, er_id, ret);
+			t->ch_id, dir, er_id, ret);
 		if (ret)
 			return ret;
 		done++;
 	}
 
 	pr_info("[crux mhi-proxy] alloc: programmed %d channel(s)\n", done);
+
+	/* [crux 2026-11-02] 把 MHI 通道接成 IPA 端点。环已经在 CCA 里换成了
+	 * 驱动侧（GSI 已初始化）的环，所以这里只需要启动通道 + 配端点。
+	 */
+	if (done && crux_connect_enable && crux_ipa_instance()) {
+		for (i = 0; i < req->tr_info_arr_len && i < QMI_IPA_MHI_CH_MAX; i++) {
+			const struct ipa_mhi_tr_info *t = &req->tr_info_arr[i];
+			bool tx = (t->ch_id == ul_id);
+			int cret;
+
+			if (t->ch_id != ul_id && t->ch_id != dl_id)
+				continue;
+			cret = crux_ipa_mhi_connect(crux_ipa_instance(), 0, tx);
+			pr_info("[crux mhi-proxy] connect ch%u %s ret=%d\n",
+				t->ch_id, tx ? "TX" : "RX", cret);
+		}
+	}
+
+	/* 原厂 __imp_configure_mhi_device 成功后紧接 imp_mhi_prepare_for_transfer()，
+	 * 让 MHI host 真正启动这些通道；只 configure 不 prepare，modem 侧 GSI
+	 * 看不到通道起来。
+	 */
+	if (done && !mhi_prepared) {
+		int pret = mhi_prepare_for_transfer(mhi_proxy_dev);
+
+		if (pret) {
+			pr_err("[crux mhi-proxy] mhi_prepare_for_transfer failed %d\n",
+			       pret);
+			return pret;
+		}
+		mhi_prepared = 1;
+		pr_info("[crux mhi-proxy] mhi_prepare_for_transfer OK\n");
+	}
+
 	return done ? 0 : -EINVAL;
+}
+
+/*
+ * [crux 2026-10-28] 握手全部异步：probe 里绝不能 msleep。
+ * 原来这段在 probe 同步跑，最长阻塞 60s，MHI 事件处理被饿死，
+ * 表现就是 X50 抬起（进 mission）时事件环堆满/超时，整机 lockup。
+ */
+static void mhi_proxy_handshake(struct work_struct *work)
+{
+	extern int ipa_qmi_rehandshake(u32 node, u32 port);
+	extern bool ipa_qmi_modem_client_ready(void);
+	struct mhi_device *mhi_dev = mhi_proxy_dev;
+	int rh, i, ret;
+
+	if (!mhi_dev)
+		return;
+
+	/* X50 重启后 QRTR 不会重复报 NEW_SERVER，旧 modem_client_sq 已失效，
+	 * 重发 INIT_DRIVER 让 modem 重新登记 client sq，再发 0x3c。
+	 */
+	rh = ipa_qmi_rehandshake(0, 0);
+	dev_info(&mhi_dev->dev,
+		 "[crux mhi-proxy] rehandshake ret=%d, wait modem client\n", rh);
+	for (i = 0; i < 30; i++) {
+		if (ipa_qmi_modem_client_ready())
+			break;
+		msleep(2000);
+	}
+	dev_info(&mhi_dev->dev,
+		 "[crux mhi-proxy] modem client ready=%d after %ds\n",
+		 ipa_qmi_modem_client_ready(), i * 2);
+
+	if (!ipa_qmi_modem_client_ready()) {
+		dev_info(&mhi_dev->dev,
+			 "[crux mhi-proxy] client not ready, skip 0x3c this round\n");
+		return;
+	}
+
+	if (skip_ready) {
+		dev_info(&mhi_dev->dev, "[crux mhi-proxy] skip_ready=1, no 0x3c\n");
+		return;
+	}
+
+	ret = mhi_proxy_send_ready_ind(mhi_proxy_ch, ARRAY_SIZE(mhi_proxy_ch));
+	dev_info(&mhi_dev->dev, "[crux mhi-proxy] MHI_READY_IND(0x3c) ret=%d\n", ret);
+	if (ret)
+		dev_info(&mhi_dev->dev,
+			 "[crux mhi-proxy] ready ind failed, wait for modem QMI to come back\n");
+}
+
+/* [crux 2026-11-02] 原厂 mhi_qcom_power_up() 的关键一步：
+ * 设备如果停在 SYS_ERR 错误态，直接走 PCIe 二次总线复位会把链路打死；
+ * 正确做法是发 MHI 软复位（MHI_STATE_RESET）并等它退出错误态，等不到才报错。
+ */
+static int crux_mhi_syserr_soft_reset(struct mhi_controller *mhi_cntrl)
+{
+	enum mhi_state st = mhi_get_mhi_state(mhi_cntrl);
+	int itr = DIV_ROUND_UP(mhi_cntrl->timeout_ms * 1000, 10);
+
+	if (st != MHI_STATE_SYS_ERR)
+		return 0;
+
+	pr_info("[crux mhi-proxy] device in SYS_ERR -> MHI soft reset\n");
+	mhi_set_mhi_state(mhi_cntrl, MHI_STATE_RESET);
+	while (itr--) {
+		st = mhi_get_mhi_state(mhi_cntrl);
+		if (st != MHI_STATE_SYS_ERR) {
+			/* 原厂：SSR 后 EE 无效，必须清零 */
+			mhi_cntrl->ee = 0;
+			pr_info("[crux mhi-proxy] soft reset done, state=%d ee=0\n", st);
+			return 0;
+		}
+		usleep_range(10, 20);
+	}
+	pr_err("[crux mhi-proxy] still SYS_ERR after soft reset -> abort\n");
+	return -EIO;
 }
 
 static int ipa_mhi_proxy_probe(struct mhi_device *mhi_dev,
@@ -344,8 +499,20 @@ static int ipa_mhi_proxy_probe(struct mhi_device *mhi_dev,
 	struct ipa_mhi_ch_init_info ch[2];
 	int ret, i;
 
+	if (!crux_proxy_enable) {
+		dev_info(&mhi_dev->dev,
+			 "[crux mhi-proxy] disabled (plain mhi_net/rmnet route) -> not binding\n");
+		return -ENODEV;
+	}
+
 	/* audit: proxy must not come up before the module is powered */
 	crux_dep_require("x50_power", CRUX_DEP_UP, "ipa_mhi_proxy_probe", false);
+
+	/* [crux 2026-11-02] 先处理 SYS_ERR：软复位而不是 PCIe 硬复位 */
+	if (crux_mhi_syserr_soft_reset(mhi_dev->mhi_cntrl)) {
+		dev_err(&mhi_dev->dev, "SYS_ERR not recovered, aborting probe\n");
+		return -EIO;
+	}
 
 	/* [crux 2026-10-19] EP 探活门控。
 	 * 对应原厂 mhi_qcom_power_up() 开头先探设备状态再碰硬件；
@@ -473,35 +640,8 @@ static int ipa_mhi_proxy_probe(struct mhi_device *mhi_dev,
 	}
 
 	if (auto_uc) {
-		/* [crux 2026-10-19] 发 0x3c 之前重新握手一次：
-		 * X50 重启后 QRTR 不会重复报 NEW_SERVER，旧 modem_client_sq 已失效。
-		 * 重发 INIT_DRIVER 让 modem 重新登记 client sq，再发 0x3c。
-		 */
-		{
-			extern int ipa_qmi_rehandshake(u32 node, u32 port);
-			extern bool ipa_qmi_modem_client_ready(void);
-			int rh, i;
-
-			rh = ipa_qmi_rehandshake(0, 0);
-			dev_info(&mhi_dev->dev,
-				 "[crux mhi-proxy] rehandshake ret=%d, wait modem client\n",
-				 rh);
-			/* [crux 2026-10-19] 与基带配合：等基带真正登记 client 端点。
-			 * 最多等 ~60s，期间内核自动重试 INIT_DRIVER。
-			 */
-			for (i = 0; i < 30; i++) {
-				if (ipa_qmi_modem_client_ready())
-					break;
-				msleep(2000);
-			}
-			dev_info(&mhi_dev->dev,
-				 "[crux mhi-proxy] modem client ready=%d after %ds\n",
-				 ipa_qmi_modem_client_ready(), i * 2);
-		}
-		ret = mhi_proxy_send_ready_ind(ch, ARRAY_SIZE(ch));
-		dev_info(&mhi_dev->dev, "[crux mhi-proxy] MHI_READY_IND(0x3c) ret=%d\n", ret);
-		if (ret) /* [crux] 原厂语义：失败不重试，等 modem IPA QMI 服务到达时再触发 */
-			dev_info(&mhi_dev->dev, "[crux mhi-proxy] ready ind failed, wait for modem QMI to come back\n");
+		/* [crux 2026-10-28] 异步执行（probe 里 sleep 会饿死 MHI 事件） */
+		schedule_delayed_work(&mhi_proxy_hs_work, 0);
 	} else {
 		dev_info(&mhi_dev->dev, "[crux mhi-proxy] auto_uc=0: skip 0x0b/0x3c (insmod auto_uc=1 to enable)\n");
 	}
@@ -668,6 +808,7 @@ static void ipa_mhi_proxy_status_cb(struct mhi_device *mhi_dev, enum mhi_callbac
 
 static void ipa_mhi_proxy_remove(struct mhi_device *mhi_dev)
 {
+	cancel_delayed_work_sync(&mhi_proxy_hs_work);
 	cancel_delayed_work_sync(&mhi_proxy_work);
 	cancel_delayed_work_sync(&mhi_proxy_rx_work);
 	ipa_qmi_register_mhi_alloc_handler(NULL);

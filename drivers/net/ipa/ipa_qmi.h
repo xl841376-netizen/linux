@@ -73,8 +73,8 @@ void ipa_qmi_teardown(struct ipa *ipa);
 /* [crux 2026-10-16] IPA-MHI proxy: tell the modem where the external modem */
 /* proxy doorbells are (QMI_IPA_MHI_READY_IND, 0x3c) */
 struct ipa_mhi_ch_init_info;
-typedef int (*ipa_mhi_alloc_handler_t)(const u8 *tr, u32 tr_len,
-				       const u8 *er, u32 er_len);
+struct ipa_mhi_alloc_ch_req;
+typedef int (*ipa_mhi_alloc_handler_t)(const struct ipa_mhi_alloc_ch_req *req);
 int ipa_qmi_register_mhi_alloc_handler(ipa_mhi_alloc_handler_t fn);
 
 int ipa_qmi_send_mhi_ready_ind(const struct ipa_mhi_ch_init_info *ch,

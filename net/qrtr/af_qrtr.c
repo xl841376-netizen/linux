@@ -267,7 +267,6 @@ static int qrtr_tx_wait(struct qrtr_node *node, int dest_node, int dest_port,
 	unsigned long key = (u64)dest_node << 32 | dest_port;
 	struct qrtr_tx_flow *flow;
 	int confirm_rx = 0;
-	int ret;
 
 	/* Never set confirm_rx on non-data packets */
 	if (type != QRTR_TYPE_DATA)
@@ -293,12 +292,17 @@ static int qrtr_tx_wait(struct qrtr_node *node, int dest_node, int dest_port,
 		return 1;
 
 	spin_lock_irq(&flow->resume_tx.lock);
-	ret = wait_event_interruptible_locked_irq(flow->resume_tx,
-						  flow->pending < QRTR_TX_FLOW_HIGH ||
-						  flow->tx_failed ||
-						  !node->ep);
-	if (ret < 0) {
-		confirm_rx = ret;
+	/* crux: 上游这里是 wait_event_interruptible_locked_irq() 无限期等对端
+	 * 回 RESUME_TX。SM8150 的 modem 固件（2022 年 Android 11/12 那套）并不
+	 * 保证回这个流控包，一旦 pending 顶到 QRTR_TX_FLOW_HIGH(10)，调用方会
+	 * 持着 qrtr_node_lock 永久睡眠，把整个 QRTR 栈拖死：实测 qrtr-ns 持锁，
+	 * ssc-uinput / qmicli 全部 D 状态，只能重启恢复。
+	 *
+	 * 原厂 5.4 内核根本没有这套流控（见 vendor init 对比），所以这里改成
+	 * "窗口满了不阻塞，直接带 confirm_rx 标志继续发"，与下游行为一致。
+	 */
+	if (flow->pending >= QRTR_TX_FLOW_HIGH && node->ep && !flow->tx_failed) {
+		confirm_rx = 1;
 	} else if (!node->ep) {
 		confirm_rx = -EPIPE;
 	} else if (flow->tx_failed) {

@@ -5,6 +5,9 @@
  */
 
 #include <linux/bitfield.h>
+
+/* crux: ipa_uc.c 导出的实例访问器 */
+extern struct ipa *crux_ipa_instance(void);
 #include <linux/bits.h>
 #include <linux/device.h>
 #include <linux/dma-direction.h>
@@ -1810,6 +1813,101 @@ static void ipa_endpoint_program(struct ipa_endpoint *endpoint)
 	ipa_endpoint_init_seq(endpoint);
 	ipa_endpoint_status(endpoint);
 }
+
+static void ipa_endpoint_setup_one(struct ipa_endpoint *endpoint);
+static void ipa_endpoint_teardown_one(struct ipa_endpoint *endpoint);
+
+/* [crux 2026-11-02] 动态连接一条 MHI 数据通道。
+ *
+ * 对应原厂 ipa3_connect_mhi_pipe()：modem 通过 IPA QMI 的 alloc 请求把
+ * 通道（ch_id/环/事件环）告诉我们之后，要把这条通道接成 IPA 端点，数据面
+ * 才算通。主线 IPA 的端点是静态表，这里提供一个最小的动态入口：
+ *   - 复用 AP_MODEM_TX / AP_MODEM_RX 两个端点；
+ *   - 把端点通道号换成 MHI 的 GSI 通道号；
+ *   - setup + enable 该端点。
+ *
+ * 由 ipa_mhi_proxy 在 alloc 处理完之后调用。
+ */
+static struct ipa_endpoint *crux_mhi_endpoint(struct ipa *ipa, bool toward_ipa)
+{
+	u32 id;
+	u32 want;
+
+	/* SM8150 是 IPA v4.1：AP_MODEM_TX endpoint_id=2(chan3)，
+	 * AP_MODEM_RX endpoint_id=11(chan6)。按语义猜会误选 AP_LAN_RX(ep10/chan5)，
+	 * 那条已经被网卡占用，start 会 oops —— 所以这里按平台版本显式指定。
+	 */
+	if (ipa->version == IPA_VERSION_4_1)
+		want = toward_ipa ? 2 : 11;
+	else
+		want = toward_ipa ? 2 : 14;   /* v4.5 及以后 */
+
+	for_each_set_bit(id, ipa->defined, ipa->endpoint_count) {
+		struct ipa_endpoint *ep = &ipa->endpoint[id];
+
+		if (ep->ee_id != GSI_EE_AP || ep->toward_ipa != toward_ipa)
+			continue;
+		if (ep->endpoint_id == want)
+			return ep;
+	}
+	return NULL;
+}
+
+int crux_ipa_mhi_connect(struct ipa *ipa, u32 gsi_chan, bool toward_ipa)
+{
+	struct ipa_endpoint *endpoint;
+	int ret;
+
+	(void)gsi_chan;   /* 通道号以端点真实配置为准（v4.1: TX=3 / RX=6） */
+
+	if (!ipa)
+		return -EINVAL;
+
+	endpoint = crux_mhi_endpoint(ipa, toward_ipa);
+	if (!endpoint)
+		return -ENOENT;
+
+	dev_info(ipa->dev, "[crux] mhi connect: %s ep=%u chan=%u\n",
+		 toward_ipa ? "TX" : "RX", endpoint->endpoint_id,
+		 endpoint->channel_id);
+
+	/* 端点配置在 ipa_setup() 时已经做过；这里只启动数据通道 */
+	ret = gsi_channel_start(&ipa->gsi, endpoint->channel_id);
+	if (ret) {
+		dev_err(ipa->dev, "[crux] mhi connect: start chan %u failed %d\n",
+			endpoint->channel_id, ret);
+		return ret;
+	}
+	__set_bit(endpoint->endpoint_id, ipa->enabled);
+	dev_info(ipa->dev, "[crux] mhi connect: %s chan %u up\n",
+		 toward_ipa ? "TX" : "RX", endpoint->channel_id);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(crux_ipa_mhi_connect);
+
+/* crux: 把驱动侧这条端点的环地址告诉 proxy，让 modem 用主机的环 */
+int crux_ipa_mhi_ring(bool toward_ipa, u64 *addr, u32 *count)
+{
+	struct ipa *ipa = crux_ipa_instance();
+	struct ipa_endpoint *endpoint;
+	struct gsi_channel *chan;
+
+	if (!ipa || !addr || !count)
+		return -EINVAL;
+	endpoint = crux_mhi_endpoint(ipa, toward_ipa);
+	if (!endpoint)
+		return -ENOENT;
+	chan = &ipa->gsi.channel[endpoint->channel_id];
+	if (!chan->tre_ring.addr || !chan->tre_ring.count)
+		return -ENOENT;
+	*addr = (u64)chan->tre_ring.addr;
+	*count = chan->tre_ring.count;
+	dev_info(ipa->dev, "[crux] mhi ring: %s chan %u addr=%pad cnt=%u\n",
+		 toward_ipa ? "TX" : "RX", endpoint->channel_id,
+		 &chan->tre_ring.addr, chan->tre_ring.count);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(crux_ipa_mhi_ring);
 
 int ipa_endpoint_enable_one(struct ipa_endpoint *endpoint)
 {

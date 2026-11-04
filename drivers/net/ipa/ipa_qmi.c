@@ -108,9 +108,13 @@ static void ipa_server_init_complete(struct ipa_qmi *ipa_qmi)
 				   ipa_init_complete_ind_ei, &ind);
 	if (ret)
 		dev_err(ipa->dev,
-			"error %d sending init complete indication\n", ret);
-	else
+			"[crux qmi] error %d sending init complete indication\n", ret);
+	else {
 		ipa_qmi->indication_sent = true;
+		dev_info(ipa->dev,
+			 "[crux qmi] INIT_COMPLETE sent to %u:%u\n",
+			 sq->sq_node, sq->sq_port);
+	}
 }
 
 /* If requested (and not already sent) send the INIT_COMPLETE indication */
@@ -272,9 +276,15 @@ static struct ipa *ipa_mhi_proxy_ipa;
 /* [crux 2026-10-17] 0x3d ALLOC_CHANNEL 的真正处理要落到外部 modem 的 MHI 控制器上，
  * 而它在 ipa_mhi_proxy 模块里。这里只留一个回调给模块注册。
  */
-typedef int (*ipa_mhi_alloc_handler_t)(const u8 *tr, u32 tr_len,
-				       const u8 *er, u32 er_len);
+typedef int (*ipa_mhi_alloc_handler_t)(const struct ipa_mhi_alloc_ch_req *req);
 static ipa_mhi_alloc_handler_t ipa_mhi_alloc_handler;
+
+
+/* resp 编码后最大长度：TLV0x02(3+4) + TLV0x10(3+1) + TLV0x11(3+1+6*2) */
+static int qmi_mhi_alloc_ch_rsp_max_len(void)
+{
+	return 8 + 5 + 17;
+}
 
 int ipa_qmi_register_mhi_alloc_handler(ipa_mhi_alloc_handler_t fn)
 {
@@ -284,6 +294,17 @@ int ipa_qmi_register_mhi_alloc_handler(ipa_mhi_alloc_handler_t fn)
 }
 EXPORT_SYMBOL_GPL(ipa_qmi_register_mhi_alloc_handler);
 
+
+/* [crux 2026-10-28] Vendor behaviour on crux (sm8150 + sdx50m): DTS has no
+ * qcom,ctrl-iova / qcom,data-iova, so vendor sets smmu_enabled = false: the
+ * MHI_READY_IND(0x3c) carries NO smmu_info TLV and no doorbell mapping is
+ * installed.  We used to advertise the TLV with base/size = 0, which can
+ * make the modem place the data plane at iova 0.  Default to vendor
+ * behaviour; enable with ipa.smmu_info=1 for A/B testing.
+ */
+static bool crux_smmu_info;
+module_param_named(smmu_info, crux_smmu_info, bool, 0644);
+MODULE_PARM_DESC(smmu_info, "advertise smmu_info TLV in MHI_READY_IND (0x3c)");
 
 int ipa_qmi_send_mhi_ready_ind(const struct ipa_mhi_ch_init_info *ch,
 			       unsigned int n_ch)
@@ -309,7 +330,8 @@ int ipa_qmi_send_mhi_ready_ind(const struct ipa_mhi_ch_init_info *ch,
 	 * smmu_info TLV(0x10)。首次发 0x3c 时 ctrl/data 的 base/size 仍为 0
 	 * （要等 0x3d 的 ctrl/data_addr_map_info 才填），原厂首次亦如此。
 	 */
-	ind.smmu_info_valid = 1;
+	if (crux_smmu_info)
+		ind.smmu_info_valid = 1;
 
 	/* [crux 2026-10-19] 原厂语义：0x3c 是 INDICATION，发完即走，
 	 * 不等 response（modem 不会回）。这里用 qmi_send_indication()，
@@ -370,33 +392,76 @@ static void ipa_server_mhi_alloc_channel(struct qmi_handle *qmi,
 		.rsp.result = QMI_RESULT_SUCCESS_V01,
 		.rsp.error = QMI_ERR_NONE_V01,
 	};
-	u32 len = min_t(u32, req->payload_len, sizeof(req->payload));
-	int ret;
+	int i, ret;
 
-	pr_info("[crux mhi-proxy] MHI_ALLOC_CHANNEL from %u:%u payload_len=%u er_len=%u\n",
-		sq->sq_node, sq->sq_port, req->payload_len, req->er_payload_len);
-	print_hex_dump(KERN_INFO, "[crux mhi-proxy] alloc TR: ",
-		       DUMP_PREFIX_OFFSET, 16, 1, req->payload, len, true);
-	print_hex_dump(KERN_INFO, "[crux mhi-proxy] alloc ER: ",
-		       DUMP_PREFIX_OFFSET, 16, 1, req->er_payload,
-		       min_t(u32, req->er_payload_len, sizeof(req->er_payload)), true);
+	pr_info("[crux mhi-proxy] MHI_ALLOC_CHANNEL from %u:%u tr=%u er=%u ctrl=%u data=%u\n",
+		sq->sq_node, sq->sq_port, req->tr_info_arr_len,
+		req->er_info_arr_len, req->ctrl_addr_map_info_len,
+		req->data_addr_map_info_len);
+
+	for (i = 0; i < req->tr_info_arr_len && i < QMI_IPA_MHI_CH_MAX; i++) {
+		const struct ipa_mhi_tr_info *t = &req->tr_info_arr[i];
+
+		pr_info("[crux mhi-proxy] TR[%d] ch=%u poll=%u brst=%u ring=%#llx len=%llu rp=%#llx wp=%#llx\n",
+			i, t->ch_id, t->poll_cfg, t->brst_mode_type,
+			(unsigned long long)t->ring_iova,
+			(unsigned long long)t->ring_len,
+			(unsigned long long)t->rp,
+			(unsigned long long)t->wp);
+	}
+	for (i = 0; i < req->er_info_arr_len && i < QMI_IPA_MHI_CH_MAX; i++) {
+		const struct ipa_mhi_er_info *e = &req->er_info_arr[i];
+
+		pr_info("[crux mhi-proxy] ER[%d] id=%u intmod=%u/%u msi=%#x ring=%#llx len=%llu rp=%#llx wp=%#llx\n",
+			i, e->er_id, e->intmod_cycles, e->intmod_count,
+			e->msi_addr,
+			(unsigned long long)e->ring_iova,
+			(unsigned long long)e->ring_len,
+			(unsigned long long)e->rp,
+			(unsigned long long)e->wp);
+	}
+	for (i = 0; i < req->ctrl_addr_map_info_len && i < QMI_IPA_MHI_MEM_MAX; i++)
+		pr_info("[crux mhi-proxy] CTRLMAP[%d] pa=%#llx iova=%#llx size=%llu\n",
+			i,
+			(unsigned long long)req->ctrl_addr_map_info[i].pa,
+			(unsigned long long)req->ctrl_addr_map_info[i].iova,
+			(unsigned long long)req->ctrl_addr_map_info[i].size);
+	for (i = 0; i < req->data_addr_map_info_len && i < QMI_IPA_MHI_MEM_MAX; i++)
+		pr_info("[crux mhi-proxy] DATAMAP[%d] pa=%#llx iova=%#llx size=%llu\n",
+			i,
+			(unsigned long long)req->data_addr_map_info[i].pa,
+			(unsigned long long)req->data_addr_map_info[i].iova,
+			(unsigned long long)req->data_addr_map_info[i].size);
 
 	if (ipa_mhi_alloc_handler) {
-		int cfg = ipa_mhi_alloc_handler(req->payload, req->payload_len,
-					 req->er_payload, req->er_payload_len);
+		int cfg = ipa_mhi_alloc_handler(req);
+
 		if (cfg) {
 			pr_err("[crux mhi-proxy] alloc handler failed %d\n", cfg);
 			rsp.rsp.result = QMI_RESULT_FAILURE_V01;
 			rsp.rsp.error = QMI_ERR_INTERNAL_V01;
 		} else {
 			pr_info("[crux mhi-proxy] alloc handler OK (CCA/ECA programmed)\n");
+			rsp.alloc_resp_arr_valid = 1;
+			rsp.alloc_resp_arr_len = req->tr_info_arr_len;
+			for (i = 0; i < req->tr_info_arr_len &&
+			     i < QMI_IPA_MHI_CH_MAX; i++) {
+				rsp.alloc_resp_arr[i].ch_id =
+					req->tr_info_arr[i].ch_id;
+				rsp.alloc_resp_arr[i].is_success = 1;
+			}
+			pr_info("[crux mhi-proxy] alloc resp: valid=1 n=%u\n",
+				rsp.alloc_resp_arr_len);
 		}
 	} else {
 		pr_err("[crux mhi-proxy] no alloc handler registered!\n");
 	}
 
+	/* [crux 2026-10-28] len 是 TLV 编码后的最大长度：TLV头3 + result/error4 = 7。
+	 * 传 sizeof(rsp)=4 会得到 qmi_encode Too Small Buffer(-525)。
+	 */
 	ret = qmi_send_response(qmi, sq, txn, IPA_QMI_MHI_ALLOC_CHANNEL,
-				sizeof(rsp), ipa_mhi_alloc_ch_rsp_ei, &rsp);
+				qmi_mhi_alloc_ch_rsp_max_len(), ipa_mhi_alloc_ch_rsp_ei, &rsp);
 	if (ret)
 		pr_err("[crux mhi-proxy] alloc resp failed %d\n", ret);
 }
@@ -791,6 +856,22 @@ int ipa_qmi_rehandshake(u32 node, u32 port)
 		return -ENODEV;
 
 	ipa_qmi = &ipa->qmi;
+
+	/* [crux 2026-10-28] 首次握手已完成且 modem 的 client 端点已知时，
+	 * 重发 INIT_DRIVER 是多余且有害的：modem 只认第一次 INIT_DRIVER，
+	 * 第二次起不应答，等 60s 超时（ret=-110）并连试 6 次，
+	 * 期间还会把 modem_sq / modem_client_sq 搅乱。
+	 * 实测：14.5s 首次握手 modem_ready=1；158s 重握手 -> ret=-110 x6。
+	 */
+	if (ipa_qmi->modem_ready && ipa_qmi->uc_ready &&
+	    ipa_qmi->modem_client_sq.sq_port) {
+		dev_info(ipa->dev,
+			 "[crux qmi] rehandshake skipped: handshake already complete (client %u:%u)\n",
+			 ipa_qmi->modem_client_sq.sq_node,
+			 ipa_qmi->modem_client_sq.sq_port);
+		return 0;
+	}
+
 	/* node/port 传 0 时沿用当前已协商的 modem server 地址；
 	 * 若已被 server_bye 清空，退回 node0 port31（X50 的 IPA control service）。
 	 */

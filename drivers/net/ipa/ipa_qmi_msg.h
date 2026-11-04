@@ -333,18 +333,66 @@ extern const struct qmi_elem_info crux_mhi_ready_ind_ei[];
  * us the TR/ER contexts to program.  We keep the raw payload (byte blob) so
  * we can log and parse it.
  */
-#define IPA_MHI_ALLOC_PAYLOAD_MAX	512
+/* [crux 2026-10-28] 0x3d 真实结构（照原厂 ipa_qmi_service_v01.h）。
+ * 元素按编译器对齐：tr=40B、er=48B、mem=24B，不能 packed，否则线上偏移错位。
+ */
+#define QMI_IPA_MHI_CH_MAX	6
+#define QMI_IPA_MHI_MEM_MAX	6
+
+struct ipa_mhi_tr_info {
+	u8 ch_id;
+	u16 poll_cfg;
+	u32 brst_mode_type;
+	u64 ring_iova;
+	u64 ring_len;
+	u64 rp;
+	u64 wp;
+};
+
+struct ipa_mhi_er_info {
+	u8 er_id;
+	u32 intmod_cycles;
+	u32 intmod_count;
+	u32 msi_addr;
+	u64 ring_iova;
+	u64 ring_len;
+	u64 rp;
+	u64 wp;
+};
+
+struct ipa_mhi_mem_addr_info {
+	u64 pa;
+	u64 iova;
+	u64 size;
+};
 
 struct ipa_mhi_alloc_ch_req {
-	u32 payload_len;	/* TLV 0x01: TR info array (count + elements) */
-	u8 payload[IPA_MHI_ALLOC_PAYLOAD_MAX];
-	u32 er_payload_len;	/* TLV 0x02: ER info array (count + elements) */
-	u8 er_payload[IPA_MHI_ALLOC_PAYLOAD_MAX];
+	u32 tr_info_arr_len;
+	struct ipa_mhi_tr_info tr_info_arr[QMI_IPA_MHI_CH_MAX];
+	u32 er_info_arr_len;
+	struct ipa_mhi_er_info er_info_arr[QMI_IPA_MHI_CH_MAX];
+	u32 ctrl_addr_map_info_len;
+	struct ipa_mhi_mem_addr_info ctrl_addr_map_info[QMI_IPA_MHI_MEM_MAX];
+	u32 data_addr_map_info_len;
+	struct ipa_mhi_mem_addr_info data_addr_map_info[QMI_IPA_MHI_MEM_MAX];
+};
+
+extern const struct qmi_elem_info ipa_mhi_tr_info_ei[];
+extern const struct qmi_elem_info ipa_mhi_er_info_ei[];
+extern const struct qmi_elem_info ipa_mhi_mem_addr_info_ei[];
+
+struct ipa_mhi_alloc_resp_info {
+	u8 ch_id;
+	u8 is_success;
 };
 
 struct ipa_mhi_alloc_ch_rsp {
 	struct qmi_response_type_v01 rsp;
+	u8 alloc_resp_arr_valid;
+	u32 alloc_resp_arr_len;
+	struct ipa_mhi_alloc_resp_info alloc_resp_arr[QMI_IPA_MHI_CH_MAX];
 };
 
 extern const struct qmi_elem_info ipa_mhi_alloc_ch_req_ei[];
+extern const struct qmi_elem_info ipa_mhi_alloc_resp_info_ei[];
 extern const struct qmi_elem_info ipa_mhi_alloc_ch_rsp_ei[];

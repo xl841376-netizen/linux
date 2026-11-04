@@ -178,6 +178,10 @@ int ipa_endpoint_modem_exception_reset_all(struct ipa *ipa);
 int ipa_endpoint_skb_tx(struct ipa_endpoint *endpoint, struct sk_buff *skb);
 
 int ipa_endpoint_enable_one(struct ipa_endpoint *endpoint);
+
+/* crux: 动态把一条 MHI GSI 通道接成 IPA 端点 */
+int crux_ipa_mhi_connect(struct ipa *ipa, u32 gsi_chan, bool toward_ipa);
+int crux_ipa_mhi_ring(bool toward_ipa, u64 *addr, u32 *count);
 void ipa_endpoint_disable_one(struct ipa_endpoint *endpoint);
 
 void ipa_endpoint_suspend_one(struct ipa_endpoint *endpoint);

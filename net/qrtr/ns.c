@@ -180,13 +180,14 @@ static void service_announce_del(struct sockaddr_qrtr *dest,
 
 	ret = kernel_sendmsg(qrtr_ns.sock, &msg, &iv, 1, sizeof(pkt));
 	if (ret < 0 && ret != -ENODEV)
-		pr_err("failed to announce del service\n");
+		/* crux: 打印 errno 并用 ratelimit，避免断链时刷屏把系统拖死 */
+		pr_err_ratelimited("failed to announce del service: %d\n", ret);
 
 	return;
 }
 
-static void lookup_notify(struct sockaddr_qrtr *to, struct qrtr_server *srv,
-			  bool new)
+static int lookup_notify(struct sockaddr_qrtr *to, struct qrtr_server *srv,
+			 bool new)
 {
 	struct qrtr_ctrl_pkt pkt;
 	struct msghdr msg = { };
@@ -211,7 +212,12 @@ static void lookup_notify(struct sockaddr_qrtr *to, struct qrtr_server *srv,
 
 	ret = kernel_sendmsg(qrtr_ns.sock, &msg, &iv, 1, sizeof(pkt));
 	if (ret < 0 && ret != -ENODEV)
-		pr_err("failed to send lookup notification\n");
+		/* crux: 同上。断链（modem server_bye）后这里会每注册一个服务就打一条，
+		 * 实测能刷上万行，console 同步输出直接拖死 CPU。限流 + 带 errno + 目标。
+		 */
+		pr_err_ratelimited("failed to send lookup notification: %d (to %u:%u)\n",
+				   ret, to->sq_node, to->sq_port);
+	return ret;
 }
 
 static int say_hello(struct sockaddr_qrtr *dest)
@@ -323,7 +329,7 @@ static int server_del(struct qrtr_node *node, unsigned int port, bool bcast)
 {
 	struct qrtr_lookup *lookup;
 	struct qrtr_server *srv;
-	struct list_head *li;
+	struct list_head *li, *tmp;
 
 	srv = xa_load(&node->servers, port);
 	if (!srv)
@@ -336,14 +342,20 @@ static int server_del(struct qrtr_node *node, unsigned int port, bool bcast)
 		service_announce_del(&qrtr_ns.bcast_sq, srv);
 
 	/* Announce the service's disappearance to observers */
-	list_for_each(li, &qrtr_ns.lookups) {
+	list_for_each_safe(li, tmp, &qrtr_ns.lookups) {
 		lookup = container_of(li, struct qrtr_lookup, li);
 		if (lookup->service && lookup->service != srv->service)
 			continue;
 		if (lookup->instance && lookup->instance != srv->instance)
 			continue;
 
-		lookup_notify(&lookup->sq, srv, false);
+		/* crux: 对端队列满（-ENOSPC）说明这个客户端已经不读了。
+		 * 继续给它发只会刷日志并拖住名字服务，直接摘掉它的 lookup。
+		 */
+		if (lookup_notify(&lookup->sq, srv, false) == -ENOSPC) {
+			list_del(&lookup->li);
+			kfree(lookup);
+		}
 	}
 
 	kfree(srv);
@@ -504,7 +516,7 @@ static int ctrl_cmd_new_server(struct sockaddr_qrtr *from,
 {
 	struct qrtr_lookup *lookup;
 	struct qrtr_server *srv;
-	struct list_head *li;
+	struct list_head *li, *tmp;
 	int ret = 0;
 
 	/* Ignore specified node and port for local servers */
@@ -547,14 +559,18 @@ static int ctrl_cmd_new_server(struct sockaddr_qrtr *from,
 	}
 
 	/* Notify any potential lookups about the new server */
-	list_for_each(li, &qrtr_ns.lookups) {
+	list_for_each_safe(li, tmp, &qrtr_ns.lookups) {
 		lookup = container_of(li, struct qrtr_lookup, li);
 		if (lookup->service && lookup->service != service)
 			continue;
 		if (lookup->instance && lookup->instance != instance)
 			continue;
 
-		lookup_notify(&lookup->sq, srv, true);
+		/* crux: 同 server_del —— 队列满的客户端直接摘除 */
+		if (lookup_notify(&lookup->sq, srv, true) == -ENOSPC) {
+			list_del(&lookup->li);
+			kfree(lookup);
+		}
 	}
 
 	return ret;
