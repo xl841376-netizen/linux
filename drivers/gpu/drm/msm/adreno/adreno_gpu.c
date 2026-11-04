@@ -331,6 +331,13 @@ int adreno_fault_handler(struct msm_gpu *gpu, unsigned long iova, int flags,
 			type, block,
 			scratch[0], scratch[1], scratch[2], scratch[3]);
 
+	{
+		static int trace_cnt;
+
+		if (trace_cnt++ < 8 || !(trace_cnt & 31))
+			msm_gem_vma_trace_dump(iova);
+	}
+
 	if (do_devcoredump) {
 		struct msm_gpu_fault_info fault_info = {};
 

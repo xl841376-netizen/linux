@@ -1040,12 +1040,64 @@ void msm_gem_describe_objects(struct list_head *list, struct seq_file *m)
 #endif
 
 /* don't call directly!  Use drm_gem_object_put() */
+/*
+ * crux: 大 BO 释放前等待 GPU 完成在途提交。
+ *
+ * 背景：BO 被释放后页表项立即撤销，但 GPU 的 CCU/UCHE 仍可能持有该
+ * iova 做压缩读写，产生 "gpu fault: ... source=CCU type=TRANSLATION"
+ * 假性错误日志（旋转/输出重建瞬间最易命中），会干扰问题定位。
+ *
+ * 只对 >=1MB 的 BO 生效（scanout / 大 FBO 这类才可能触发），且只在
+ * 有在途提交时等待，上限 200ms；原子上下文直接跳过。
+ * 可通过模块参数 msm.gpu_idle_before_free=0 关闭。
+ */
+static bool gpu_idle_before_free = true;
+module_param_named(gpu_idle_before_free, gpu_idle_before_free, bool, 0600);
+MODULE_PARM_DESC(gpu_idle_before_free,
+                 "Wait for GPU idle before freeing BOs (default: on)");
+
+/*
+ * crux: 原实现只对 >=1MB 的 BO 等待，但实测 CCU fault 命中的是 4KB 的
+ * 小 BO（gnome-shell 的每帧池），门槛把它放过去了。默认 0 = 所有大小都等。
+ */
+static unsigned int gpu_idle_min_kb = 1024;
+module_param_named(gpu_idle_min_kb, gpu_idle_min_kb, uint, 0600);
+MODULE_PARM_DESC(gpu_idle_min_kb,
+                 "Only wait for GPU idle for BOs >= this size in KB (0 = all sizes)");
+
+static void
+msm_gem_wait_gpu_idle(struct drm_device *dev, size_t size)
+{
+	struct msm_drm_private *priv = dev->dev_private;
+	struct msm_gpu *gpu;
+
+	if (!gpu_idle_before_free)
+		return;
+
+	if (!priv || !(gpu = priv->gpu))
+		return;
+
+	if (size < (size_t)gpu_idle_min_kb * 1024)
+		return;
+
+	if (in_atomic() || irqs_disabled())
+		return;
+
+	if (!READ_ONCE(gpu->active_submits))
+		return;
+
+	wait_event_timeout(gpu->retire_event, !READ_ONCE(gpu->active_submits),
+			msecs_to_jiffies(200));
+}
+
 static void msm_gem_free_object(struct drm_gem_object *obj)
 {
 	struct msm_gem_object *msm_obj = to_msm_bo(obj);
 	struct drm_device *dev = obj->dev;
 	struct msm_drm_private *priv = dev->dev_private;
 	struct drm_exec exec;
+
+	msm_gem_wait_gpu_idle(dev, obj->size);
 
 	mutex_lock(&priv->obj_lock);
 	list_del(&msm_obj->node);

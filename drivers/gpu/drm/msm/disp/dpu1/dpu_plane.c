@@ -88,6 +88,21 @@ struct dpu_plane {
 	const struct dpu_mdss_cfg *catalog;
 };
 
+/*
+ * crux: 横屏/旋转合成时 GPU 会把 UBWC 压缩 buffer 当作渲染目标(RB/CCU)，
+ * 压缩缓存与页表释放不同步时会报 "gpu fault ... source=CCU"。
+ * linear_scanout=1 时不向用户态广告 QCOM_COMPRESSED，合成器改用线性
+ * scanout buffer，从而绕开 CCU 路径。默认 0 = 保持原行为。
+ */
+static bool dpu_linear_scanout;
+module_param_named(linear_scanout, dpu_linear_scanout, bool, 0600);
+MODULE_PARM_DESC(linear_scanout, "Advertise only linear scanout modifiers (CCU fault workaround)");
+
+static const uint64_t linear_only_format_modifiers[] = {
+	DRM_FORMAT_MOD_LINEAR,
+	DRM_FORMAT_MOD_INVALID
+};
+
 static const uint64_t supported_format_modifiers[] = {
 	DRM_FORMAT_MOD_QCOM_COMPRESSED,
 	DRM_FORMAT_MOD_LINEAR,
@@ -1786,6 +1801,9 @@ static bool dpu_plane_format_mod_supported(struct drm_plane *plane,
 	if (modifier == DRM_FORMAT_MOD_LINEAR)
 		return true;
 
+	if (dpu_linear_scanout)
+		return false;
+
 	if (modifier == DRM_FORMAT_MOD_QCOM_COMPRESSED && !has_no_ubwc)
 		return dpu_find_format(format, qcom_compressed_supported_formats,
 				ARRAY_SIZE(qcom_compressed_supported_formats));
@@ -1836,7 +1854,8 @@ static struct drm_plane *dpu_plane_init_common(struct drm_device *dev,
 	pdpu = drmm_universal_plane_alloc(dev, struct dpu_plane, base,
 				0xff, &dpu_plane_funcs,
 				format_list, num_formats,
-				supported_format_modifiers, type, NULL);
+				dpu_linear_scanout ? linear_only_format_modifiers :
+						     supported_format_modifiers, type, NULL);
 	if (IS_ERR(pdpu))
 		return ERR_CAST(pdpu);
 

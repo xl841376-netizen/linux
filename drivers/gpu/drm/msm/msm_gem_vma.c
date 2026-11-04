@@ -21,6 +21,80 @@ static uint vm_log_shift = 0;
 MODULE_PARM_DESC(vm_log_shift, "Length of VM op log");
 module_param_named(vm_log_shift, vm_log_shift, uint, 0600);
 
+/*
+ * crux debug: global (cross-VM) ring of recent map/unmap operations, so a GPU
+ * iova fault can be correlated with the buffer that used to live there.
+ */
+#define MSM_VMA_TRACE_N	256
+
+struct msm_vma_trace_ent {
+	u64 iova;
+	u64 range;
+	const char *op;
+	u32 pid;
+	char comm[16];
+};
+
+static struct msm_vma_trace_ent msm_vma_trace[MSM_VMA_TRACE_N];
+static atomic_t msm_vma_trace_idx = ATOMIC_INIT(0);
+
+static void msm_vma_trace_add(const char *op, u64 iova, u64 range)
+{
+	unsigned int i;
+	struct msm_vma_trace_ent *e;
+
+	/* per-page map 会把 unmap 历史淹没，只记录非 map 操作 */
+	if (!strcmp(op, "map"))
+		return;
+
+	i = (unsigned int)atomic_inc_return(&msm_vma_trace_idx) &
+		 (MSM_VMA_TRACE_N - 1);
+	e = &msm_vma_trace[i];
+
+	e->iova = iova;
+	e->range = range;
+	e->op = op;
+	e->pid = task_pid_nr(current);
+	strscpy(e->comm, current->comm, sizeof(e->comm));
+}
+
+void msm_gem_vma_trace_dump(unsigned long fault_iova)
+{
+	unsigned int idx = (unsigned int)atomic_read(&msm_vma_trace_idx);
+	bool any = false;
+	int k;
+
+	pr_warn("*** vma trace for fault iova=0x%lx ***\n", fault_iova);
+
+	for (k = 1; k <= MSM_VMA_TRACE_N; k++) {
+		struct msm_vma_trace_ent *e =
+			&msm_vma_trace[(idx - k) & (MSM_VMA_TRACE_N - 1)];
+
+		if (!e->op)
+			break;
+		if (fault_iova >= e->iova && fault_iova < e->iova + e->range) {
+			pr_warn("  HIT %s pid=%u comm=%s 0x%llx-0x%llx\n",
+				e->op, e->pid, e->comm, e->iova,
+				e->iova + e->range);
+			any = true;
+		}
+	}
+
+	if (!any) {
+		pr_warn("  (no entry covers it; 10 most recent ops:)\n");
+		for (k = 1; k <= 10; k++) {
+			struct msm_vma_trace_ent *e =
+				&msm_vma_trace[(idx - k) & (MSM_VMA_TRACE_N - 1)];
+
+			if (!e->op)
+				break;
+			pr_warn("   %s pid=%u comm=%s 0x%llx-0x%llx\n",
+				e->op, e->pid, e->comm, e->iova,
+				e->iova + e->range);
+		}
+	}
+}
+
 /**
  * struct msm_vm_map_op - create new pgtable mapping
  */
@@ -225,6 +299,8 @@ static void
 vm_log(struct msm_gem_vm *vm, const char *op, uint64_t iova, uint64_t range, int queue_id)
 {
 	int idx;
+
+	msm_vma_trace_add(op, iova, range);
 
 	if (!vm->managed)
 		lockdep_assert_held(&vm->mmu_lock);

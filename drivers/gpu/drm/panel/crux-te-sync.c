@@ -172,11 +172,12 @@ static void crux_dump(struct crux_te *t)
 
     if (changed && time_after(jiffies, t->last_warn + 60 * HZ)) {
         t->last_warn = jiffies;
-        pr_warn("[crux-te] 异常：%d 个稳定寄存器偏离基线\n", changed);
+        /* [crux] 每次切 90Hz 档都会重编程 TE，基线偏移属预期行为，按 info 记录 */
+        pr_info("[crux-te] 稳定寄存器偏离基线：%d 个\n", changed);
         for (i = 0; i < n; i++) {
             if (mono[i] || v[i] == t->prev[i])
                 continue;
-            pr_warn("[crux-te] %s: 基线 %08x -> 现在 %08x\n",
+            pr_info("[crux-te] %s: 基线 %08x -> 现在 %08x\n",
                     nm[i], t->prev[i], v[i]);
         }
     }
