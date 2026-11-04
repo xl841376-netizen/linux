@@ -43,6 +43,17 @@
 
 #define DEV_NAME		"crux-esoc"
 
+/*
+ * 恢复策略：模组在已上电状态下把 STATUS 拉低（异常复位）时，谁来把它拉回来。
+ *   1 = 驱动自己恢复（旧行为，默认，保证没人管的时候还能自愈）
+ *   0 = 驱动只报事件，恢复动作交给用户态（crux-qmi / 上位机 supervisor）
+ * 运行时可改：echo 0 > /sys/module/crux_esoc/parameters/auto_recover
+ */
+static bool auto_recover = false;
+module_param(auto_recover, bool, 0644);
+MODULE_PARM_DESC(auto_recover,
+		 "Recover the modem in-driver when STATUS falls while powered (0 = leave it to userspace)");
+
 /* ---- 与厂商 uapi 对齐的 ABI ---- */
 #define CRUX_ESOC_CODE		0xCC
 #define CRUX_ESOC_CMD_EXE	_IOW(CRUX_ESOC_CODE, 1, unsigned int)
@@ -93,7 +104,12 @@ enum crux_esoc_notify {
 #define T_RESET_COLD		600	/* cold reset */
 #define T_PON_SETTLE		150	/* 放开复位后等基带稳定 */
 #define T_POFF_HOLD		300	/* 断电时按住不放之后 */
-#define T_ERRFATAL_SETTLE	50
+/* [crux 2026-11-02] 对齐原厂 esoc-mdm-4x.c：
+ * errfatal/复位后必须等 SDI/ramdump 路径走完，原厂注释明确写着
+ * "reducing it will result in booting failure of the sdx55"。
+ * 原厂非下载模式 1700ms，下载模式用 ramdump_delay(2000ms)；取 2000 保险。
+ */
+#define T_ERRFATAL_SETTLE	2000
 
 enum {
 	GP_RESET = 0,		/* qcom,ap2mdm-soft-reset-gpio（低=复位） */
@@ -215,13 +231,38 @@ static void x50_pci_down(struct crux_esoc *e)
 	pci_unlock_rescan_remove();
 }
 
+static bool x50_root_port_present(void)
+{
+	struct pci_dev *rp = pci_get_device(X50_PCI_VENDOR,
+					    X50_PCI_DEV_ROOTPORT, NULL);
+
+	if (!rp)
+		return false;
+	pci_dev_put(rp);
+	return true;
+}
+
 static void x50_pci_up(struct crux_esoc *e)
 {
-	struct pci_dev *rp;
+	struct pci_dev *rp = NULL;
 	struct pci_bus *bus;
+	unsigned int tries;
+
+	/* [crux] 顺序契约：PCIe host 必须先 probe 出来，否则 rescan 是空操作。
+	 * 内嵌（CONFIG_CRUX_ESOC=y）时本驱动的 initcall 早于 PCIe host 完全就绪，
+	 * 所以在取根端口上等最多 3s，而不是一次失败就放弃。
+	 */
+	/* 这里已经是"条件满足后的动作"：预检说根端口在，就再给 3 次机会。
+	 * 3 次都取不到说明链路掉了，直接放弃，不空转。
+	 */
+	for (tries = 0; tries < 3; tries++) {
+		rp = pci_get_device(X50_PCI_VENDOR, X50_PCI_DEV_ROOTPORT, NULL);
+		if (rp)
+			break;
+		msleep(500);
+	}
 
 	pci_lock_rescan_remove();
-	rp = pci_get_device(X50_PCI_VENDOR, X50_PCI_DEV_ROOTPORT, NULL);
 	bus = rp ? rp->bus : NULL;
 	if (bus)
 		pci_rescan_bus(bus);
@@ -250,6 +291,16 @@ static void x50_resume_work(struct work_struct *w);
 static int x50_power_on(struct crux_esoc *e)
 {
 	dev_info(e->dev, "%s: PWR_ON\n", DEV_NAME);
+
+	/* [crux] 预检通过才动基带：PCIe host 没就绪时拉电源只会得到一个
+	 * 永远不枚举的端点，所以这里直接拒绝，让用户态/内核重试。
+	 */
+	if (!x50_root_port_present()) {
+		dev_err(e->dev, "%s: precheck failed: no X50 root port (PCIe host not ready)\n",
+			DEV_NAME);
+		return -ENODEV;
+	}
+
 
 	/* [crux 2026-10-19] 用户定的规矩：
 	 *   首次启动（开机/冷复位上电）执行一次链路训练；
@@ -464,6 +515,12 @@ static void x50_resume_work(struct work_struct *w)
 	struct crux_esoc *e = container_of(w, struct crux_esoc, resume_work);
 
 	mutex_lock(&e->lock);
+	if (!auto_recover) {
+		dev_warn(e->dev, "%s: auto_recover=0, recovery left to userspace\n",
+			 DEV_NAME);
+		mutex_unlock(&e->lock);
+		return;
+	}
 	if (!e->powered || gpiod_get_value(e->gpio[GP_MDM_STATUS])) {
 		mutex_unlock(&e->lock);
 		return;
@@ -491,7 +548,12 @@ static irqreturn_t x50_status_irq(int irq, void *data)
 	if (!high && e->powered) {
 		dev_err(e->dev, "%s: unexpected reset (STATUS fell while powered)\n",
 			DEV_NAME);
-		schedule_work(&e->resume_work);
+		if (auto_recover)
+			schedule_work(&e->resume_work);
+		else
+			dev_warn(e->dev,
+				 "%s: auto_recover=0, event left to userspace (crux-qmi)\n",
+				 DEV_NAME);
 	} else if (high) {
 		dev_info(e->dev, "%s: STATUS high (modem boot done)\n", DEV_NAME);
 	}
@@ -518,6 +580,16 @@ static void x50_pon_wait_work(struct work_struct *w)
 static int x50_reset_do(struct crux_esoc *e, unsigned int ms)
 {
 	dev_info(e->dev, "%s: RESET (%ums low pulse)\n", DEV_NAME, ms);
+
+	/* [crux] 预检通过才动基带：PCIe host 没就绪时拉电源只会得到一个
+	 * 永远不枚举的端点，所以这里直接拒绝，让用户态/内核重试。
+	 */
+	if (!x50_root_port_present()) {
+		dev_err(e->dev, "%s: precheck failed: no X50 root port (PCIe host not ready)\n",
+			DEV_NAME);
+		return -ENODEV;
+	}
+
 
 	/* [crux 2026-10-19] 冷复位允许再做一次链路训练 */
 	e->pcie_resumed = false;

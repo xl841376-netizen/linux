@@ -172,8 +172,8 @@ static struct npu_reg npu_saved_bw_registers[] = {
 
 static const struct npu_irq npu_irq_info[NPU_MAX_IRQ] = {
 	{"ipc_irq", 0, IRQF_TRIGGER_HIGH},
-	{"error_irq", 0, IRQF_TRIGGER_RISING | IRQF_ONESHOT},
-	{"wdg_bite_irq", 0, IRQF_TRIGGER_RISING | IRQF_ONESHOT},
+	{"error_irq", 0, IRQF_TRIGGER_RISING},
+	{"wdg_bite_irq", 0, IRQF_TRIGGER_RISING},
 };
 
 static struct npu_device *g_npu_dev;
@@ -1743,7 +1743,7 @@ static int npu_parse_dt_clock(struct npu_device *npu_dev)
 	num_clk = of_property_count_strings(pdev->dev.of_node,
 			"clock-names");
 	if (num_clk <= 0) {
-		pr_warn("clocks not defined (主线移植: npu_boot24 已开时钟)\n");
+		pr_info("clocks not defined (主线移植: npu_boot24 已开时钟)\n");
 		rc = 0;
 		goto clk_err;
 	} else if (num_clk > NUM_MAX_CLK_NUM) {
@@ -1782,7 +1782,7 @@ static int npu_parse_dt_regulator(struct npu_device *npu_dev)
 	num = of_property_count_strings(pdev->dev.of_node,
 			"qcom,proxy-reg-names");
 	if (num <= 0) {
-		pr_warn("regulator not defined (主线移植: 跳过)\n");
+		pr_info("regulator not defined (主线移植: 跳过)\n");
 		rc = 0;
 		goto regulator_err;
 	}
@@ -1963,7 +1963,7 @@ static int npu_pwrctrl_init(struct npu_device *npu_dev)
 			return ret;
 		}
 	} else {
-		pr_warn("bwdev is not defined in dts\n");
+		pr_info("bwdev is not defined in dts\n");
 		pwr->devbw = NULL;
 	}
 

@@ -30,6 +30,13 @@ static DEFINE_SPINLOCK(crux_dep_slock);
 static LIST_HEAD(crux_dep_entries);
 static unsigned int crux_dep_count;
 
+/* 编译期已知的依赖名：开机预注册，运行时只查找，不在原子上下文里分配 */
+static const char *const crux_dep_builtin[] = {
+	"ufs",
+	"x50_ee",
+	"x50_power",
+};
+
 const char *crux_dep_state_name(enum crux_dep_state state)
 {
 	switch (state) {
@@ -58,11 +65,12 @@ static struct crux_dep_entry *crux_dep_lookup(const char *name)
 	if (e || crux_dep_count >= CRUX_DEP_MAX_ENTRIES)
 		return e;
 
-	e = kzalloc(sizeof(*e), GFP_KERNEL);
+	/* 可能被 irqs_disabled/tasklet 调用：必须 GFP_ATOMIC */
+	e = kzalloc(sizeof(*e), GFP_ATOMIC);
 	if (!e)
 		return NULL;
 
-	e->name = kstrdup(name, GFP_KERNEL);
+	e->name = kstrdup_const(name, GFP_ATOMIC);
 	if (!e->name) {
 		kfree(e);
 		return NULL;
@@ -147,6 +155,105 @@ bool crux_dep_require(const char *name, enum crux_dep_state state,
 }
 EXPORT_SYMBOL_GPL(crux_dep_require);
 
+#define CRUX_DEP_GATE_MAX_RETRIERS	16
+
+struct crux_dep_retrier {
+	const char *who;
+	unsigned int tries;
+};
+
+static DEFINE_SPINLOCK(crux_dep_gate_slock);
+static struct crux_dep_retrier crux_dep_retriers[CRUX_DEP_GATE_MAX_RETRIERS];
+
+static bool crux_dep_gate_bump(const char *who, unsigned int max_tries,
+			       unsigned int *tries)
+{
+	struct crux_dep_retrier *r = NULL;
+	unsigned long flags;
+	int i;
+	bool give_up = false;
+
+	spin_lock_irqsave(&crux_dep_gate_slock, flags);
+	for (i = 0; i < CRUX_DEP_GATE_MAX_RETRIERS; i++) {
+		if (crux_dep_retriers[i].who == who ||
+		    (crux_dep_retriers[i].who &&
+		     !strcmp(crux_dep_retriers[i].who, who))) {
+			r = &crux_dep_retriers[i];
+			break;
+		}
+		if (!crux_dep_retriers[i].who) {
+			r = &crux_dep_retriers[i];
+			r->who = who;
+			r->tries = 0;
+			break;
+		}
+	}
+	if (r) {
+		r->tries++;
+		*tries = r->tries;
+		if (max_tries && r->tries >= max_tries) {
+			give_up = true;
+			r->tries = 0;
+		}
+	}
+	spin_unlock_irqrestore(&crux_dep_gate_slock, flags);
+	return give_up;
+}
+
+static void crux_dep_gate_reset(const char *who)
+{
+	unsigned long flags;
+	int i;
+
+	spin_lock_irqsave(&crux_dep_gate_slock, flags);
+	for (i = 0; i < CRUX_DEP_GATE_MAX_RETRIERS; i++) {
+		if (crux_dep_retriers[i].who &&
+		    !strcmp(crux_dep_retriers[i].who, who)) {
+			crux_dep_retriers[i].tries = 0;
+			break;
+		}
+	}
+	spin_unlock_irqrestore(&crux_dep_gate_slock, flags);
+}
+
+int crux_dep_gate(const char *who, const struct crux_dep_req *reqs,
+		  unsigned int n, int on_missing)
+{
+	unsigned int i;
+	unsigned int missing = 0;
+	unsigned int tries = 0;
+
+	if (!reqs || !n)
+		return 0;
+
+	for (i = 0; i < n; i++) {
+		enum crux_dep_state cur = crux_dep_get(reqs[i].name);
+
+		if (cur == reqs[i].state)
+			continue;
+
+		missing++;
+		pr_info("crux_dep: precheck %s: %s needs %s, is %s\n",
+			who ? who : "consumer", reqs[i].name,
+			crux_dep_state_name(reqs[i].state),
+			crux_dep_state_name(cur));
+	}
+
+	if (!missing) {
+		crux_dep_gate_reset(who ? who : "consumer");
+		return 0;
+	}
+
+	/* 只看不判：等待本身不计入失败次数，条件一到位就自然通过。 */
+	crux_dep_gate_bump(who ? who : "consumer", 0, &tries);
+
+	pr_info("crux_dep: precheck %s: %u/%u unmet (waited %u), %s\n",
+		who ? who : "consumer", missing, n, tries,
+		on_missing == -EPROBE_DEFER ? "retry later" : "not starting");
+	return on_missing;
+}
+EXPORT_SYMBOL_GPL(crux_dep_gate);
+
 static int crux_dep_show(struct seq_file *s, void *unused)
 {
 	struct crux_dep_entry *e;
@@ -163,6 +270,28 @@ DEFINE_SHOW_ATTRIBUTE(crux_dep);
 
 static int __init crux_dep_init(void)
 {
+	unsigned long flags;
+	unsigned int i;
+
+	/* 预注册内置名字：name 指向字符串字面量，生命周期与内核相同，无需复制 */
+	spin_lock_irqsave(&crux_dep_slock, flags);
+	for (i = 0; i < ARRAY_SIZE(crux_dep_builtin); i++) {
+		struct crux_dep_entry *e;
+
+		if (crux_dep_find(crux_dep_builtin[i]))
+			continue;
+		if (crux_dep_count >= CRUX_DEP_MAX_ENTRIES)
+			break;
+		e = kzalloc(sizeof(*e), GFP_ATOMIC);
+		if (!e)
+			break;
+		e->name = crux_dep_builtin[i];
+		e->state = CRUX_DEP_UNKNOWN;
+		list_add_tail(&e->node, &crux_dep_entries);
+		crux_dep_count++;
+	}
+	spin_unlock_irqrestore(&crux_dep_slock, flags);
+
 	debugfs_create_file("states", 0444, NULL, NULL, &crux_dep_fops);
 	pr_info("crux_dep: provider/consumer state contract ready\n");
 	return 0;

@@ -40,4 +40,28 @@ int crux_dep_wait(const char *name, enum crux_dep_state state,
 bool crux_dep_require(const char *name, enum crux_dep_state state,
 		      const char *who, bool quiet);
 
+/*
+ * Pre-flight check.  A driver calls this before touching any hardware:
+ * every entry lists a provider state it needs.  When all of them match the
+ * gate returns 0 and the driver goes on; otherwise it prints one report
+ * naming each unmet requirement and returns @on_missing unchanged
+ * (normally -EPROBE_DEFER, or -ENODEV when the caller must not proceed).
+ */
+struct crux_dep_req {
+	const char *name;
+	enum crux_dep_state state;
+};
+
+/*
+ * The gate never gives up on its own: an unmet requirement means "the
+ * provider has not reached that state yet", which is not a failure to be
+ * counted.  It returns @on_missing (normally -EPROBE_DEFER) every time, so
+ * the wait lasts exactly as long as the precondition is missing.
+ *
+ * A caller that wants a bounded number of real attempts must do that on its
+ * side, around the action it performs after the gate returned 0.
+ */
+int crux_dep_gate(const char *who, const struct crux_dep_req *reqs,
+		  unsigned int n, int on_missing);
+
 #endif /* _LINUX_CRUX_DEP_H */

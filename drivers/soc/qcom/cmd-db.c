@@ -357,7 +357,7 @@ static int crux_cmd_db_dynscan(void)
 		v = readl_relaxed(q + i);
 		if (v == 0x0c0330db) {
 			cmd_db_header = (struct cmd_db_header *)(q + i - 4);
-			pr_err("cmd-db: [crux] dynscan found magic at 0x%llx\n",
+			pr_info("cmd-db: [crux] dynscan found magic at 0x%llx\n",
 			       0x85E00000ULL + i);
 			return 0;
 		}
@@ -393,7 +393,7 @@ static int cmd_db_dev_probe(struct platform_device *pdev)
 		if (ret)
 			return ret;
 	} else {
-		pr_err("cmd-db: [crux] standard path OK (magic at reserved region)\n");
+		pr_info("cmd-db: [crux] standard path OK (magic at reserved region)\n");
 	}
 
 	debugfs_create_file("cmd-db", 0400, NULL, NULL, &cmd_db_debugfs_ops);
