@@ -102,6 +102,17 @@
 
 /* MISC 外设（0x1600） */
 #define TEMP_RANGE_STATUS_REG		(MISC_BASE + 0x06)
+#define MISC_THERMREG_SRC_CFG_REG		(MISC_BASE + 0x70)
+#define THERMREG_SW_ICL_ADJUST_BIT		BIT(7)
+#define THERMREG_DIE_ADC_SRC_EN_BIT		BIT(1)
+#define THERMREG_DIE_CMP_SRC_EN_BIT		BIT(0)
+#define THERMREG_SRC_CFG_MASK			(BIT(7) | BIT(4) | BIT(3) | BIT(2) | \
+					 BIT(1) | BIT(0))
+
+/* BATIF 外设（0x1200） */
+#define BATIF_BASE			0x1200
+#define BATIF_ADC_CHANNEL_EN_REG		(BATIF_BASE + 0x82)
+#define DIE_TEMP_CHANNEL_EN_BIT			BIT(2)
 #define TEMP_RANGE_MASK			GENMASK(4, 1)
 #define TEMP_ABOVE_RANGE_BIT		BIT(3)
 
@@ -179,6 +190,8 @@ struct crux_smb5 {
 	int			last_status;
 	int			last_jeita_stage;
 	bool			digital_temp_over;	/* PMIC 温度范围超限 */
+	bool			bypass_active;		/* EOC 后切旁路：停充、系统吃 VBUS */
+	unsigned long		bypass_exit;		/* 上次退出旁路的时刻 */
 	u32			pd_icl_ua;	/* 已下发的 PD 联动 ICL，0=未同步 */
 };
 
@@ -254,6 +267,9 @@ static int crux_charger_status(struct crux_smb5 *chg)
 {
 	unsigned int stat = 0, en = 0;
 
+	if (chg->bypass_active && crux_input_online(chg))
+		return POWER_SUPPLY_STATUS_FULL;
+
 	if (regmap_read(chg->regmap, CHARGING_ENABLE_CMD, &en))
 		en = 0;
 
@@ -277,6 +293,16 @@ static int crux_charger_status(struct crux_smb5 *chg)
 	default:
 		return POWER_SUPPLY_STATUS_UNKNOWN;
 	}
+}
+
+/* 统一开关充电（sysfs 与旁路状态机共用） */
+static void crux_charge_enable(struct crux_smb5 *chg, bool en)
+{
+	if (regmap_update_bits(chg->regmap, CHARGING_ENABLE_CMD, BIT(0),
+			       en ? BIT(0) : 0))
+		return;
+
+	dev_info(chg->dev, "charge_enable -> %d\n", en);
 }
 
 /* --------------------------------------------------------- 属性 get/set */
@@ -494,6 +520,30 @@ static void crux_jeita_apply(struct crux_smb5 *chg)
 	power_supply_changed(chg->psy);
 }
 
+/*
+ * 配置 die temp 热调节源（对应下游 smb5_configure_mitigation 的 die-temp 分支）：
+ *   BATIF_ADC_CHANNEL_EN_REG  BIT2 DIE_TEMP_CHANNEL_EN      —— 使能 die temp ADC 通道
+ *   MISC_THERMREG_SRC_CFG_REG BIT1 DIE_ADC_SRC_EN | BIT0 DIE_CMP_SRC_EN
+ *
+ * 这两处不配，TEMP_RANGE_STATUS(0x1606) 的 ABOVE/WITHIN/BELOW 位就是浮的：
+ * 实测 die_temp 42.7C 时该寄存器报 0x02(BELOW) 并来回跳到 0x08(ABOVE)。
+ * 配好之后状态位才反映真实 die 温度区间。
+ */
+static int crux_thermreg_init(struct crux_smb5 *chg)
+{
+	int rc;
+
+	rc = regmap_update_bits(chg->regmap, BATIF_ADC_CHANNEL_EN_REG,
+				DIE_TEMP_CHANNEL_EN_BIT, DIE_TEMP_CHANNEL_EN_BIT);
+	if (rc)
+		return rc;
+
+	return regmap_update_bits(chg->regmap, MISC_THERMREG_SRC_CFG_REG,
+				  THERMREG_SRC_CFG_MASK,
+				  THERMREG_DIE_ADC_SRC_EN_BIT |
+				  THERMREG_DIE_CMP_SRC_EN_BIT);
+}
+
 /* PMIC 自身温度范围状态（原厂靠 IIO ADC 读 die_temp，我们用状态位即可） */
 static void crux_check_pmic_temp(struct crux_smb5 *chg)
 {
@@ -655,6 +705,84 @@ static void crux_pd_icl_sync(struct crux_smb5 *chg)
 		 want / 1000, want / 1000);
 }
 
+/* --------------------------------------------------- EOC 后旁路供电 */
+/*
+ * 电池充满（CHGR_STATUS_1 = TERMINATE_CHARGE）后不再维持充电：
+ *   1) 关掉充电使能，系统继续吃 VBUS（旁路），电池不再被顶在 4.35V；
+ *   2) 电压掉到 bypass_resume_uv 以下再恢复充电，避免频繁 top-off；
+ *   3) 满充那一刻的"学习容量"由电量计侧 reconcile 选出并上报（见 bq27xxx）。
+ * 目的是减少电池在满电高压区的停留时间和充放循环。
+ */
+static bool crux_bypass = true;
+module_param_named(bypass, crux_bypass, bool, 0644);
+MODULE_PARM_DESC(bypass, "crux: switch to bypass supply after EOC (default on)");
+
+#define CRUX_BYPASS_ENTER_UV	4200000		/* 进旁路要求电压确实在顶 */
+#define CRUX_BYPASS_ARM		msecs_to_jiffies(60000)
+
+static int crux_bypass_resume_uv = 4150000;
+module_param_named(bypass_resume_uv, crux_bypass_resume_uv, int, 0644);
+MODULE_PARM_DESC(bypass_resume_uv, "crux: bypass exit threshold in uV (default 4.15V)");
+
+static void crux_bypass_apply(struct crux_smb5 *chg, int status)
+{
+	union power_supply_propval v;
+	int uv;
+
+	if (!crux_bypass)
+		return;
+
+	if (!crux_input_online(chg)) {
+		if (chg->bypass_active) {
+			chg->bypass_active = false;
+			dev_info(chg->dev, "bypass: adapter removed\n");
+		}
+		return;
+	}
+
+	/* JEITA 正在禁充时不要抢控制权 */
+	if (chg->last_jeita_stage && !crux_jeita_fcc(chg->last_jeita_stage))
+		return;
+
+	if (!chg->batt_psy) {
+		chg->batt_psy = power_supply_get_by_name("bq27z561-0");
+		if (!chg->batt_psy)
+			return;
+	}
+
+	if (power_supply_get_property(chg->batt_psy,
+				      POWER_SUPPLY_PROP_VOLTAGE_NOW, &v))
+		uv = 0;
+	else
+		uv = v.intval;
+
+	if (!chg->bypass_active) {
+		/* 只认"真充满"：状态 TERMINATE 且电压确实在顶 */
+		if (status != POWER_SUPPLY_STATUS_FULL)
+			return;
+		if (uv > 0 && uv < CRUX_BYPASS_ENTER_UV)
+			return;
+		/* 刚退出旁路时别马上又进去，给充电一点时间 */
+		if (chg->bypass_exit &&
+		    time_before(jiffies, chg->bypass_exit + CRUX_BYPASS_ARM))
+			return;
+		chg->bypass_active = true;
+		crux_charge_enable(chg, false);
+		dev_info(chg->dev,
+			 "bypass: EOC at %dmV, charging stopped, system on VBUS\n",
+			 uv / 1000);
+		return;
+	}
+
+	if (uv > 0 && uv <= crux_bypass_resume_uv) {
+		chg->bypass_active = false;
+		chg->bypass_exit = jiffies;
+		crux_charge_enable(chg, true);
+		dev_info(chg->dev, "bypass: vbat %dmV <= %dmV, resume charging\n",
+			 uv / 1000, crux_bypass_resume_uv / 1000);
+	}
+}
+
 static void crux_smb5_poll(struct work_struct *work)
 {
 	struct crux_smb5 *chg = container_of(to_delayed_work(work),
@@ -666,6 +794,7 @@ static void crux_smb5_poll(struct work_struct *work)
 	crux_pd_icl_sync(chg);
 	crux_check_pmic_temp(chg);
 	crux_jeita_apply(chg);
+	crux_bypass_apply(chg, status);
 
 	if (online != chg->last_online || status != chg->last_status) {
 		dev_info(chg->dev,
@@ -775,17 +904,15 @@ static ssize_t charge_enable_store(struct device *dev,
 {
 	struct crux_smb5 *chg = dev_get_drvdata(dev);
 	bool en;
-	int rc;
 
 	if (kstrtobool(buf, &en))
 		return -EINVAL;
 
-	rc = regmap_update_bits(chg->regmap, CHARGING_ENABLE_CMD, BIT(0),
-				en ? BIT(0) : 0);
-	if (rc)
-		return rc;
+	/* 手工开充视为退出旁路，避免状态机把用户的意图盖回去 */
+	if (en)
+		chg->bypass_active = false;
 
-	dev_info(chg->dev, "charge_enable -> %d\n", en);
+	crux_charge_enable(chg, en);
 	return count;
 }
 static DEVICE_ATTR_RW(charge_enable);
@@ -1074,6 +1201,12 @@ static int crux_smb5_probe(struct platform_device *pdev)
 
 	/* 先套策略，再取初始状态 */
 	crux_apply_policy(chg);
+
+	/* 配好 die temp 热调节源，让 TEMP_RANGE_STATUS 有意义 */
+	if (crux_thermreg_init(chg))
+		dev_warn(&pdev->dev, "thermreg src cfg failed\n");
+	else
+		dev_info(&pdev->dev, "thermreg: die temp ADC+CMP src enabled\n");
 
 	chg->last_online = crux_input_online(chg) ? 1 : 0;
 	chg->last_status = crux_charger_status(chg);

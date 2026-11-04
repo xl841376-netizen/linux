@@ -50,6 +50,8 @@
 #include <linux/workqueue.h>
 #include <linux/delay.h>
 #include <linux/platform_device.h>
+
+extern int crux_fcc_override_mah;
 #include <linux/power_supply.h>
 #include <linux/slab.h>
 #include <linux/of.h>
@@ -1912,6 +1914,144 @@ static int bq27xxx_battery_current_and_status(
 	return 0;
 }
 
+/* ------------------------------------------------------------------------
+ * crux：充电时长对账 + OCV 兜底
+ *
+ * bq27z561 的 Impedance Track 只在真正走到 EOC（满充静置）或放空时才更新
+ * QMAX/FCC。本机充电长期被关、几乎到不了 TERMINATE_CHARGE，FCC 被一路学小
+ * （实测 198mAh vs 设计 4000mAh），芯片 SOC 因此长期报个位数（4.118V 报 9%）。
+ * 上游驱动只做"寄存器镜像"，这类状态下百分比永远是错的，故补两条保守规则：
+ *
+ *   A. 满充锁存：电压 >= 4.30V 且 |I| <= 50mA 连续保持 10 分钟 -> 判定已满，
+ *      对外 SOC 锁 100；放电到 4.25V 以下且电流为负时解除。
+ *   B. FCC 兜底：FCC 小于设计容量的一半（明显不可信）时，SOC 改用静置 OCV
+ *      曲线估算，不再采信芯片的个位数。
+ *
+ * 两者都只影响上报值，不写芯片寄存器（避免污染 gauge / 需要 unseal）。
+ * 可用 bq27xxx_battery.reconcile=0 整体关闭。
+ * ------------------------------------------------------------------------ */
+#define BQ27XXX_FULL_VOLT_UV	4300000
+#define BQ27XXX_RELEASE_VOLT_UV	4250000
+#define BQ27XXX_FULL_CURR_UA	50000
+#define BQ27XXX_FULL_HOLD	(10 * 60 * HZ)
+
+static bool bq27xxx_reconcile = true;
+module_param_named(reconcile, bq27xxx_reconcile, bool, 0644);
+MODULE_PARM_DESC(reconcile, "crux: enable full-charge reconcile / OCV fallback");
+
+/* 单节 4.35V 体系的静置 OCV 曲线（保守取值，宁低勿高） */
+static int bq27xxx_soc_from_voltage(int uv)
+{
+	static const struct { int uv; u8 pct; } ocv[] = {
+		{ 4350000, 100 }, { 4300000, 95 }, { 4200000, 86 },
+		{ 4100000, 76 },  { 4000000, 64 }, { 3900000, 52 },
+		{ 3800000, 39 },  { 3700000, 26 }, { 3650000, 15 },
+		{ 3500000, 5 },   { 3300000, 0 },
+	};
+	int i;
+
+	if (uv >= ocv[0].uv)
+		return 100;
+
+	for (i = 1; i < ARRAY_SIZE(ocv); i++) {
+		if (uv >= ocv[i].uv) {
+			int duv = ocv[i - 1].uv - ocv[i].uv;
+			int dpct = ocv[i - 1].pct - ocv[i].pct;
+
+			return ocv[i].pct + DIV_ROUND_CLOSEST((uv - ocv[i].uv) * dpct, duv);
+		}
+	}
+
+	return 0;
+}
+
+/*
+ * 从候选里挑一个可信的 FCC（µAh）：
+ *   候选 = 芯片学到的 FCC、手工 fcc_override、设计容量
+ *   规则 = 覆盖值当上限；超出 [design/2, design*1.1] 的一律判为不可信，
+ *          回落到设计容量。raw 回传芯片原始值，供上层判断是否需要兜底。
+ */
+static int bq27xxx_effective_fcc(struct bq27xxx_device_info *di, int *raw)
+{
+	union power_supply_propval v;
+	int design = di->charge_design_full;
+	int fcc = 0;
+
+	if (!bq27xxx_battery_read_fcc(di, &v) && v.intval > 0)
+		fcc = v.intval;
+
+	if (raw)
+		*raw = fcc;
+
+	if (crux_fcc_override_mah > 0 &&
+	    (fcc <= 0 || fcc > crux_fcc_override_mah * 1000))
+		fcc = crux_fcc_override_mah * 1000;
+
+	if (design > 0 &&
+	    (fcc <= 0 || fcc < design / 2 || fcc > design * 11 / 10))
+		fcc = design;
+
+	return fcc;
+}
+
+static void bq27xxx_battery_reconcile(struct bq27xxx_device_info *di)
+{
+	union power_supply_propval cur;
+	int uv, raw, eff;
+
+	if (!bq27xxx_reconcile)
+		return;
+
+	uv = bq27xxx_read(di, BQ27XXX_REG_VOLT, false);
+	if (uv < 0)
+		return;
+	uv *= 1000;
+
+	if (bq27xxx_battery_current_and_status(di, &cur, NULL, NULL))
+		return;
+
+	/* 先选出本次"学习容量"，满充锁存与兜底都用它 */
+	eff = bq27xxx_effective_fcc(di, &raw);
+	di->learned_fcc_ua = eff;
+
+	if (uv >= BQ27XXX_FULL_VOLT_UV &&
+	    cur.intval > -BQ27XXX_FULL_CURR_UA &&
+	    cur.intval < BQ27XXX_FULL_CURR_UA) {
+		if (!di->full_since) {
+			di->full_since = jiffies;
+		} else if (!di->capacity_full_latched &&
+			   time_after(jiffies, di->full_since + BQ27XXX_FULL_HOLD)) {
+			di->capacity_full_latched = true;
+			dev_info(di->dev,
+				 "reconcile: %dmV held %dmin at %dmA, latched full (SOC=100, FCC=%dmAh)\n",
+				 uv / 1000, BQ27XXX_FULL_HOLD / (60 * HZ),
+				 cur.intval / 1000, eff / 1000);
+		}
+	} else {
+		di->full_since = 0;
+		if (di->capacity_full_latched && uv < BQ27XXX_RELEASE_VOLT_UV &&
+		    cur.intval < 0) {
+			di->capacity_full_latched = false;
+			dev_info(di->dev, "reconcile: full latch released at %dmV\n",
+				 uv / 1000);
+		}
+	}
+
+	if (raw > 0 && eff > 0 && raw != eff) {
+		di->ocv_fallback = true;
+		di->ocv_soc = bq27xxx_soc_from_voltage(uv);
+		if (!di->fcc_warned) {
+			di->fcc_warned = true;
+			dev_warn(di->dev,
+				 "reconcile: gauge FCC %dmAh implausible, use %dmAh (design %dmAh), SOC from OCV (%d%%)\n",
+				 raw / 1000, eff / 1000,
+				 di->charge_design_full / 1000, di->ocv_soc);
+		}
+	} else {
+		di->ocv_fallback = false;
+	}
+}
+
 static void bq27xxx_battery_update_unlocked(struct bq27xxx_device_info *di)
 {
 	union power_supply_propval status = di->last_status;
@@ -1941,6 +2081,8 @@ static void bq27xxx_battery_update_unlocked(struct bq27xxx_device_info *di)
 
 	if (memcmp(&di->cache, &cache, sizeof(cache)) != 0)
 		di->cache = cache;
+
+	bq27xxx_battery_reconcile(di);
 
 	di->last_update = jiffies;
 
@@ -2147,6 +2289,29 @@ static int bq27xxx_battery_get_property(struct power_supply *psy,
 		ret = bq27xxx_battery_current_and_status(di, val, NULL, NULL);
 		break;
 	case POWER_SUPPLY_PROP_CAPACITY:
+		/* crux：满充锁存 / OCV 兜底优先于芯片 SOC */
+		if (di->capacity_full_latched) {
+			val->intval = 100;
+			break;
+		}
+		if (di->ocv_fallback) {
+			val->intval = di->ocv_soc;
+			break;
+		}
+		/* 有覆盖值时用"剩余容量 / 覆盖 FCC"重算百分比，避免芯片 SOC
+		 * 在 DF 被清过后长期卡在 0~1%。
+		 */
+		if (crux_fcc_override_mah > 0) {
+			union power_supply_propval rc;
+			int cap;
+
+			if (!bq27xxx_battery_read_rc(di, &rc) && rc.intval > 0) {
+				cap = DIV_ROUND_CLOSEST(rc.intval * 100,
+							crux_fcc_override_mah * 1000);
+				val->intval = cap < 0 ? 0 : (cap > 100 ? 100 : cap);
+				break;
+			}
+		}
 		ret = bq27xxx_simple_value(di->cache.capacity, val);
 		break;
 	case POWER_SUPPLY_PROP_CAPACITY_LEVEL:
@@ -2177,7 +2342,9 @@ static int bq27xxx_battery_get_property(struct power_supply *psy,
 			ret = bq27xxx_battery_read_rc(di, val);
 		break;
 	case POWER_SUPPLY_PROP_CHARGE_FULL:
-		ret = bq27xxx_battery_read_fcc(di, val);
+		/* crux：从候选（芯片 FCC / 手工覆盖 / 设计值）里挑可信的那个上报 */
+		val->intval = bq27xxx_effective_fcc(di, NULL);
+		ret = 0;
 		break;
 	case POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN:
 		ret = bq27xxx_battery_read_dcap(di, val);

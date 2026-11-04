@@ -66,6 +66,13 @@ struct bq27xxx_device_info {
 	bool removed;
 	unsigned long last_update;
 	union power_supply_propval last_status;
+	/* crux：满充对账与 OCV 兜底状态（详见 bq27xxx_battery.c） */
+	unsigned long full_since;	/* 满充判据连续满足的起点 jiffies */
+	bool capacity_full_latched;	/* 已判定满充，对外 SOC 锁 100 */
+	bool ocv_fallback;		/* FCC 不可信，SOC 改由 OCV 估算 */
+	bool fcc_warned;		/* FCC 异常只告警一次 */
+	u8 ocv_soc;			/* OCV 估算出的 SOC（0~100） */
+	int learned_fcc_ua;		/* 本次选出的"学习容量"（µAh） */
 	struct delayed_work work;
 	struct power_supply *bat;
 	struct list_head list;

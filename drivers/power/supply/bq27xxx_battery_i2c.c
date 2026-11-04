@@ -102,6 +102,211 @@ static int bq27xxx_battery_i2c_write(struct bq27xxx_device_info *di, u8 reg,
 	return 0;
 }
 
+
+/* ---------------- crux debug: MAC / DF block access ----------------
+ * BQ27Z561 TRM(SLUUC54): MAC 与 DF 都通过 AltManufacturerAccess(0x3E) 的块协议。
+ *   块写 = 2 字节 LE 参数(命令码 或 DF 起始地址) [+ 最多 32 字节数据]
+ *   块读 = 先写 1 字节 0x3E，再读 36 字节（参数回显 + 32 数据 + 校验/长度）
+ *
+ * 用法（/sys/bus/i2c/devices/0-0055/）：
+ *   echo "c:0x21"  > mac     # 发 MAC 命令（如 0x0021 Gauging），结果留在 mac
+ *   echo "c:0x54"  > mac     # OperationStatus
+ *   echo "r:0x4000" > mac    # 读 DF 0x4000 起 32 字节
+ *   echo "w:0x4000:0fa00100" > mac   # 写 DF 0x4000 = 00 0f a0 01（hex，小端）
+ *   cat mac                  # 输出上次块读的 36 字节
+ */
+#define CRUX_MAC_MAX	36
+static u8 crux_mac_buf[CRUX_MAC_MAX];
+static int crux_mac_len;
+
+static int crux_bq_mac_word_cmd(struct i2c_client *client, u8 command, u16 cmd)
+{
+	u8 b[3];
+	struct i2c_msg m;
+
+	b[0] = command;		/* 0x00 ManufacturerAccess / 0x3E AltManufacturerAccess */
+	b[1] = (u8)(cmd & 0xff);
+	b[2] = (u8)(cmd >> 8);
+
+	m.addr = client->addr;
+	m.flags = 0;
+	m.len = 3;
+	m.buf = b;
+
+	return i2c_transfer(client->adapter, &m, 1) == 1 ? 0 : -EIO;
+}
+
+static int crux_bq_mac_word(struct i2c_client *client, u16 cmd)
+{
+	return crux_bq_mac_word_cmd(client, 0x00, cmd);
+}
+
+static int crux_bq_block_write(struct i2c_client *client, u16 word,
+			       const u8 *data, int n)
+{
+	u8 b[2 + 32];
+	struct i2c_msg m;
+
+	if (n > 32)
+		return -EINVAL;
+	b[0] = 0x3e;		/* AltManufacturerAccess block */
+	b[1] = (u8)(2 + n);	/* SMBus block count: addr(2) + data */
+	b[2] = (u8)(word & 0xff);
+	b[3] = (u8)(word >> 8);
+	if (n)
+		memcpy(&b[4], data, n);
+
+	m.addr = client->addr;
+	m.flags = 0;
+	m.len = 4 + n;
+	m.buf = b;
+
+	return i2c_transfer(client->adapter, &m, 1) == 1 ? 0 : -EIO;
+}
+
+static int crux_bq_block_read(struct i2c_client *client, u8 *out, int len)
+{
+	u8 reg = 0x3e;
+	struct i2c_msg m[2];
+
+	m[0].addr = client->addr;
+	m[0].flags = 0;
+	m[0].len = 1;
+	m[0].buf = &reg;
+	m[1].addr = client->addr;
+	m[1].flags = I2C_M_RD;
+	m[1].len = len;
+	m[1].buf = out;
+
+	return i2c_transfer(client->adapter, m, 2) == 2 ? 0 : -EIO;
+}
+
+static ssize_t mac_store(struct device *dev, struct device_attribute *attr,
+			 const char *buf, size_t count)
+{
+	struct i2c_client *client = to_i2c_client(dev);
+	unsigned int a;
+	int ret, n = 0;
+	u8 data[32];
+	const char *p;
+
+	(void)attr;
+	crux_mac_len = 0;
+
+	if (!strncmp(buf, "e:", 2)) {
+		if (kstrtouint(buf + 2, 0, &a))
+			return -EINVAL;
+		ret = crux_bq_mac_word_cmd(client, 0x3e, (u16)a);
+		if (ret)
+			return ret;
+		return count;
+	}
+
+	if (!strncmp(buf, "d:", 2)) {
+		if (kstrtouint(buf + 2, 0, &a))
+			return -EINVAL;
+		ret = crux_bq_mac_word_cmd(client, 0x3e, (u16)a);
+		if (ret)
+			return ret;
+		usleep_range(20000, 25000);
+		ret = crux_bq_block_read(client, crux_mac_buf, CRUX_MAC_MAX);
+		if (ret)
+			return ret;
+		crux_mac_len = CRUX_MAC_MAX;
+		return count;
+	}
+
+	if (!strncmp(buf, "c:", 2) || !strncmp(buf, "r:", 2)) {
+		if (kstrtouint(buf + 2, 0, &a))
+			return -EINVAL;
+		if (buf[0] == 'c')
+			ret = crux_bq_mac_word(client, (u16)a);
+		else
+			ret = crux_bq_block_write(client, (u16)a, NULL, 0);
+		if (ret)
+			return ret;
+		usleep_range(20000, 25000);
+		ret = crux_bq_block_read(client, crux_mac_buf, CRUX_MAC_MAX);
+		if (ret)
+			return ret;
+		crux_mac_len = CRUX_MAC_MAX;
+		return count;
+	}
+
+	if (!strncmp(buf, "w:", 2)) {
+		p = buf + 2;
+		if (kstrtouint(p, 0, &a))
+			return -EINVAL;
+		p = strchr(p, ':');
+		if (!p)
+			return -EINVAL;
+		p++;
+		while (p[0] && p[1] && n < (int)sizeof(data)) {
+			unsigned int byte;
+			char h[3] = { p[0], p[1], 0 };
+
+			if (kstrtouint(h, 16, &byte))
+				break;
+			data[n++] = (u8)byte;
+			p += 2;
+			while (*p == ' ')
+				p++;
+		}
+		if (!n)
+			return -EINVAL;
+		ret = crux_bq_block_write(client, (u16)a, data, n);
+		if (ret)
+			return ret;
+		usleep_range(20000, 25000);
+		return count;
+	}
+
+	return -EINVAL;
+}
+
+static ssize_t mac_show(struct device *dev, struct device_attribute *attr,
+			char *buf)
+{
+	int i, n = 0;
+
+	(void)dev;
+	(void)attr;
+	if (!crux_mac_len)
+		return sysfs_emit(buf, "none\n");
+	for (i = 0; i < crux_mac_len && n < (int)PAGE_SIZE - 4; i++)
+		n += sysfs_emit_at(buf, n, "%02x ", crux_mac_buf[i]);
+	n += sysfs_emit_at(buf, n, "\n");
+	return n;
+}
+static DEVICE_ATTR_RW(mac);
+
+/* 手工 FCC 覆盖值（mAh），0 = 不覆盖，用芯片值 */
+int crux_fcc_override_mah;
+EXPORT_SYMBOL_GPL(crux_fcc_override_mah);
+
+static ssize_t fcc_override_show(struct device *dev,
+				 struct device_attribute *attr, char *buf)
+{
+	(void)dev;
+	(void)attr;
+	return sysfs_emit(buf, "%d\n", crux_fcc_override_mah);
+}
+
+static ssize_t fcc_override_store(struct device *dev,
+				  struct device_attribute *attr,
+				  const char *buf, size_t count)
+{
+	int v;
+	(void)dev;
+	(void)attr;
+
+	if (kstrtoint(buf, 0, &v) || v < 0)
+		return -EINVAL;
+	crux_fcc_override_mah = v;
+	return count;
+}
+static DEVICE_ATTR_RW(fcc_override);
+
 static int bq27xxx_battery_i2c_bulk_read(struct bq27xxx_device_info *di, u8 reg,
 					 u8 *data, int len)
 {
@@ -197,6 +402,10 @@ static int bq27xxx_battery_i2c_probe(struct i2c_client *client)
 
 	i2c_set_clientdata(client, di);
 
+	device_create_file(&client->dev, &dev_attr_mac);
+	device_create_file(&client->dev, &dev_attr_fcc_override);
+
+
 	if (client->irq) {
 		ret = request_threaded_irq(client->irq,
 				NULL, bq27xxx_battery_irq_handler_thread,
@@ -206,7 +415,9 @@ static int bq27xxx_battery_i2c_probe(struct i2c_client *client)
 			dev_err(&client->dev,
 				"Unable to register IRQ %d error %d\n",
 				client->irq, ret);
-			bq27xxx_battery_teardown(di);
+			device_remove_file(&client->dev, &dev_attr_mac);
+			device_remove_file(&client->dev, &dev_attr_fcc_override);
+	bq27xxx_battery_teardown(di);
 			return ret;
 		}
 	}
