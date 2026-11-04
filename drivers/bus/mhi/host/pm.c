@@ -136,6 +136,9 @@ enum mhi_pm_state __must_check mhi_tryset_pm_state(struct mhi_controller *mhi_cn
 	mhi_cntrl->pm_state = state;
 	return mhi_cntrl->pm_state;
 }
+/* [crux] pci_generic 在放弃恢复时需要把控制器钉在错误态（纯软件操作，
+ * 不碰寄存器），因此这里导出给同目录的 PCI 控制器驱动使用。 */
+EXPORT_SYMBOL_GPL(mhi_tryset_pm_state);
 
 void mhi_set_mhi_state(struct mhi_controller *mhi_cntrl, enum mhi_state state)
 {
@@ -153,7 +156,8 @@ void mhi_set_mhi_state(struct mhi_controller *mhi_cntrl, enum mhi_state state)
 	if (ret)
 		dev_err(dev, "Failed to set MHI state to: %s\n",
 			mhi_state_str(state));
-}
+}EXPORT_SYMBOL_GPL(mhi_set_mhi_state);
+
 
 /* NOP for backward compatibility, host allowed to ring DB in M2 state */
 static void mhi_toggle_dev_wake_nop(struct mhi_controller *mhi_cntrl)
@@ -422,12 +426,16 @@ static int mhi_pm_mission_mode_transition(struct mhi_controller *mhi_cntrl)
 
 	/* Force MHI to be in M0 state before continuing */
 	ret = __mhi_device_get_sync(mhi_cntrl);
+	dev_info(dev, "[crux mhi-dbg] mission-dbg: ee=%d pm=0x%x get=%d\n",
+		 ee, mhi_cntrl->pm_state, ret);
 	if (ret)
 		return ret;
 
 	read_lock_bh(&mhi_cntrl->pm_lock);
 
 	if (MHI_PM_IN_ERROR_STATE(mhi_cntrl->pm_state)) {
+		dev_info(dev, "[crux mhi-dbg] mission-dbg: error state 0x%x\n",
+			 mhi_cntrl->pm_state);
 		ret = -EIO;
 		goto error_mission_mode;
 	}
@@ -457,6 +465,8 @@ static int mhi_pm_mission_mode_transition(struct mhi_controller *mhi_cntrl)
 	 * The MHI devices are only created when the client device switches its
 	 * Execution Environment (EE) to either SBL or AMSS states
 	 */
+	dev_info(dev, "[crux mhi-dbg] mission-dbg: creating devices ee=%d\n",
+		 mhi_cntrl->ee);
 	mhi_create_devices(mhi_cntrl);
 
 	read_lock_bh(&mhi_cntrl->pm_lock);

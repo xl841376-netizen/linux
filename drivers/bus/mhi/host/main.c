@@ -988,13 +988,23 @@ void mhi_create_devices(struct mhi_controller *mhi_cntrl)
 	int i, ret;
 
 	mhi_chan = mhi_cntrl->mhi_chan;
+	dev_info(dev, "[crux mhi-dbg] create-enter max_chan=%d ee=%d\n",
+		 mhi_cntrl->max_chan, mhi_cntrl->ee);
 	for (i = 0; i < mhi_cntrl->max_chan; i++, mhi_chan++) {
+		if (mhi_chan->chan >= 100)
+			dev_info(dev, "[crux mhi-dbg] create-scan chan=%d name=%s cfg=%d ee=%d mask=0x%x dir=%d dev=%d\n",
+				 mhi_chan->chan, mhi_chan->name ? mhi_chan->name : "?",
+				 mhi_chan->configured, mhi_cntrl->ee, mhi_chan->ee_mask,
+				 (int)mhi_chan->dir, mhi_chan->mhi_dev ? 1 : 0);
 		if (!mhi_chan->configured || mhi_chan->mhi_dev ||
 		    !(mhi_chan->ee_mask & BIT(mhi_cntrl->ee)))
 			continue;
 		mhi_dev = mhi_alloc_device(mhi_cntrl);
-		if (IS_ERR(mhi_dev))
+		if (IS_ERR(mhi_dev)) {
+			dev_err(dev, "[crux mhi-dbg] alloc-fail chan=%d err=%ld\n",
+				mhi_chan->chan, PTR_ERR(mhi_dev));
 			return;
+		}
 
 		mhi_dev->dev_type = MHI_DEVICE_XFER;
 		switch (mhi_chan->dir) {
@@ -1009,6 +1019,8 @@ void mhi_create_devices(struct mhi_controller *mhi_cntrl)
 			break;
 		default:
 			dev_err(dev, "Direction not supported\n");
+			dev_err(dev, "[crux mhi-dbg] dir-bad chan=%d dir=%d\n",
+				mhi_chan->chan, (int)mhi_chan->dir);
 			put_device(&mhi_dev->dev);
 			return;
 		}

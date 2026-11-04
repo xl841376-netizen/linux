@@ -17,6 +17,7 @@
 #include <linux/pm_runtime.h>
 #include <linux/timer.h>
 #include <linux/workqueue.h>
+#include "internal.h"
 
 #define MHI_PCI_DEFAULT_BAR_NUM 0
 
@@ -474,8 +475,11 @@ static const struct mhi_channel_config mhi_qcom_sdx50m_channels[] = {
 	MHI_CHANNEL_CONFIG_DL_FP(35, "FIREHOSE", 32, 1),
 	MHI_CHANNEL_CONFIG_UL(46, "IP_SW0", 64, 2),
 	MHI_CHANNEL_CONFIG_DL(47, "IP_SW0", 64, 3),
-	/* IP_HW_OFFLOAD_0：原厂 base 不标 offload，覆盖层给 104 加上；
-	 * 105 本来就带 offload+lpm。主线要求 num_elements 非 0，取 64。 */
+	/* [crux 2026-11-02 回退] 原厂 sm8150-sdx50m.dtsi 明确：100/101 disabled，
+	 * 数据面走 104/105 的 offload 通道 + client-managed offload 事件环
+	 * （mhi_event@5/6, num-elements=0, msi 5/6, brst=3, hw-ev）。
+	 * 配套的是 ipa_mhi_proxy + IPA 端点，不是普通 mhi_net。
+	 */
 	{ .name = "IP_HW_OFFLOAD_0", .num = 104, .num_elements = 64,
 	  .event_ring = 5, .dir = DMA_TO_DEVICE,
 	  .type = MHI_CH_TYPE_OUTBOUND, .ee_mask = BIT(MHI_EE_AMSS),
@@ -495,10 +499,8 @@ static struct mhi_event_config mhi_qcom_sdx50m_events[] = {
 	MHI_EVENT_CONFIG_DATA(1, 256),
 	MHI_EVENT_CONFIG_DATA(2, 256),
 	MHI_EVENT_CONFIG_DATA(3, 256),
-	MHI_EVENT_CONFIG_SW_DATA(4, 64),
-	/* [crux 2026-10-19] 原厂覆盖层把 ER5/ER6 从 ch100/101 的 HW_DATA
-	 * 改成 ch104/105 的 offload 事件环：num-elements=0、client-manage、
-	 * offload、msi 不变、brst=3。主线对 0 元素事件环不做上下文初始化。 */
+	/* [crux 2026-11-02 回退] 原厂 mhi_event@5/6：client-managed 的 offload 事件环，
+	 * num-elements=0、msi 5/6、brst=3，由 ipa_mhi_proxy 自己填 CCA/ECA。 */
 	{ .num_elements = 0, .irq_moderation_ms = 0, .irq = 6,
 	  .channel = 104, .priority = 1, .mode = MHI_DB_BRST_ENABLE,
 	  .data_type = MHI_ER_DATA, .hardware_event = true,
@@ -1277,6 +1279,8 @@ MODULE_DEVICE_TABLE(pci, mhi_pci_id_table);
 enum mhi_pci_device_status {
 	MHI_PCI_DEV_STARTED,
 	MHI_PCI_DEV_SUSPENDED,
+	/* [crux] åæ ¸åæ¢å¤åªåä¸æ¬¡ï¼ç¬¬äºæ¬¡ä¸å power_up */
+	MHI_PCI_DEV_RECOVERY_TRIED,
 };
 
 struct mhi_pci_device {
@@ -1509,6 +1513,34 @@ static void mhi_pci_recovery_work(struct work_struct *work)
 	pci_load_saved_state(pdev, mhi_pdev->pci_state);
 	pci_restore_state(pdev);
 
+	/*
+	 * [crux] åæ ¸ååªåä¸æ¬¡å®æ´æ¢å¤ãåæ¬¡è¿å¥è¯´æä¸ä¸æ¬¡æ²¡æåæ¥ï¼
+	 * æ­¤æ¶ mhi_sync_power_up() ä¼èµ° mhi_pm_mission_mode_transition()ï¼
+	 * å¨ pm_lock ä¸ç­ M0ï¼__mhi_device_get_syncï¼ï¼è®¾å¤å·²æ­»æ¶æ°¸è¿ä¸è¿åï¼
+	 * è¡¨ç°ä¸ºæ´æºå¡æ­»ï¼ä¸æ¸¸ mhi_async_power_up / mhi_pm_disable_transition å·²ç¥æ­»éï¼ã
+	 * æä»¥ç¬¬äºæ¬¡åªæå½æ°å¤ä½ãæè®¾å¤çå¨ DEADï¼äº¤ç»ç¨æ·æå¼æå·éå¯ã
+	 */
+	if (test_and_set_bit(MHI_PCI_DEV_RECOVERY_TRIED, &mhi_pdev->status)) {
+		dev_warn(&pdev->dev,
+			 "recovery already tried, leaving device down for userspace\n");
+
+		/*
+		 * 把控制器钉在错误态：任何残留的 MHI 客户端（qrtr / ipa_mhi_proxy
+		 * / wwan）再去 get_sync 都会立刻失败退出，不会等 M0 把整机挂住。
+		 */
+		if (mhi_tryset_pm_state(mhi_cntrl, MHI_PM_FW_DL_ERR) ==
+		    MHI_PM_FW_DL_ERR)
+			dev_warn(&pdev->dev,
+				 "mhi0 marked FW_DL_ERR, clients fail fast\n");
+
+		/* 状态契约同步给消费者：引擎据此走 pwr_off + pwr_on 冷重启 */
+		crux_dep_set("x50_power", CRUX_DEP_DOWN);
+
+		if (pci_try_reset_function(pdev))
+			dev_err(&pdev->dev, "left device down, reset failed\n");
+		return;
+	}
+
 	if (!mhi_pci_is_alive(mhi_cntrl))
 		goto err_try_reset;
 
@@ -1523,6 +1555,7 @@ static void mhi_pci_recovery_work(struct work_struct *work)
 	dev_dbg(&pdev->dev, "Recovery completed\n");
 
 	set_bit(MHI_PCI_DEV_STARTED, &mhi_pdev->status);
+	clear_bit(MHI_PCI_DEV_RECOVERY_TRIED, &mhi_pdev->status);
 
 	if (!pdev->is_virtfn)
 		mod_timer(&mhi_pdev->health_check_timer, jiffies + HEALTH_CHECK_PERIOD);
@@ -1603,7 +1636,23 @@ static int mhi_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	dev_info(&pdev->dev, "MHI PCI device found: %s\n", info->name);
 
 	/* audit: endpoint enumerated while esoc says the module is not powered? */
-	crux_dep_require("x50_power", CRUX_DEP_UP, "mhi_pci_probe", false);
+	/* [crux] 加载前预检：基带没上电就不要绑定 MHI。
+	 * 不满足返回 -EPROBE_DEFER，等 x50_power=up、PCI rescan 之后由内核重试。
+	 */
+	/* 只等基带上电。固件（qcom/sdx50m/sbl1.mbn）是编进内核镜像的
+	 * CONFIG_EXTRA_FIRMWARE，不经分区，所以这里不依赖 ufs。
+	 */
+	static const struct crux_dep_req mhi_pci_reqs[] = {
+		{ "x50_power", CRUX_DEP_UP },
+	};
+
+	/* 条件不出现就一直 defer，不把"等待"算成失败：x50_power 只能由
+	 * 用户态 PWR_ON 置位，给它数次数没有意义。
+	 */
+	err = crux_dep_gate("mhi_pci_probe", mhi_pci_reqs,
+			    ARRAY_SIZE(mhi_pci_reqs), -EPROBE_DEFER);
+	if (err)
+		return err;
 
 	/* mhi_pdev.mhi_cntrl must be zero-initialized */
 	mhi_pdev = devm_kzalloc(&pdev->dev, sizeof(*mhi_pdev), GFP_KERNEL);
@@ -1682,6 +1731,9 @@ static int mhi_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	}
 
 	err = mhi_async_power_up(mhi_cntrl);
+	/* [crux 2026-11-02] 固定 PCIe 链路速率：不让 runtime PM 挂起/恢复，
+	 * 避免链路速率变化被厂商固件当成 QLINK gear 变化而触发 RFLM 断言。 */
+	pm_runtime_forbid(&pdev->dev);
 	if (err) {
 		dev_err(&pdev->dev, "failed to power up MHI controller\n");
 		goto err_unprepare;
