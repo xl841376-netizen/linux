@@ -182,8 +182,37 @@ static int wcd934x_slim_status_up(struct slim_device *sdev)
 		return ret;
 	}
 
-	ret = mfd_add_devices(dev, PLATFORM_DEVID_AUTO, wcd934x_devices,
-			      ARRAY_SIZE(wcd934x_devices), NULL, 0, NULL);
+	/* [crux 2026-10-29] 只在 DT 里真的写了 codec 侧 SoundWire 子节点
+	 * （compatible = "qcom,soundwire-v1.3.0"）时才注册该子设备。
+	 * 无条件注册的两个后果：DT 没有该节点时 mfd-core 打
+	 * "Failed to locate of_node"；DT 有节点但端口数与硬件上报不符时
+	 * qcom soundwire 驱动打 din-ports mismatch。
+	 * crux 音频走 QUAT_MI2S + cs35l41，不用 codec 侧 SoundWire。
+	 */
+	{
+		struct mfd_cell cells[ARRAY_SIZE(wcd934x_devices)];
+		struct device_node *child;
+		bool have_swr = false;
+		int n = 0, i;
+
+		for_each_child_of_node(dev->of_node, child) {
+			if (of_device_is_compatible(child, "qcom,soundwire-v1.3.0")) {
+				have_swr = true;
+				of_node_put(child);
+				break;
+			}
+		}
+
+		for (i = 0; i < ARRAY_SIZE(wcd934x_devices); i++) {
+			if (!have_swr &&
+			    !strcmp(wcd934x_devices[i].name, "wcd934x-soundwire"))
+				continue;
+			cells[n++] = wcd934x_devices[i];
+		}
+
+		ret = mfd_add_devices(dev, PLATFORM_DEVID_AUTO, cells, n,
+				      NULL, 0, NULL);
+	}
 	if (ret) {
 		dev_err(dev, "Failed to add child devices: err = %d\n",
 			ret);

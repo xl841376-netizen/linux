@@ -8,6 +8,7 @@
  */
 
 #include <linux/kernel.h>
+#include <linux/dma-mapping.h>
 #include <linux/platform_device.h>
 #include <linux/acpi.h>
 #include <linux/list.h>
@@ -183,6 +184,15 @@ static int mfd_add_device(struct device *parent, int id,
 	pdev->dev.dma_mask = parent->dma_mask;
 	pdev->dev.dma_parms = parent->dma_parms;
 	pdev->dev.coherent_dma_mask = parent->coherent_dma_mask;
+	/*
+	 * [crux] 某些 mfd 父设备（如 SLIMbus 上的 wcd934x）本身没有 dma_mask，
+	 * 子设备继承到 NULL，of_dma_configure() 会打 "DMA mask not set"（子设
+	 * 备走 regmap，根本不做 DMA）。这里补一个 32 位默认掩码，让继承链完整。
+	 */
+	if (!pdev->dev.dma_mask) {
+		pdev->dev.coherent_dma_mask = DMA_BIT_MASK(32);
+		pdev->dev.dma_mask = &pdev->dev.coherent_dma_mask;
+	}
 
 	ret = regulator_bulk_register_supply_alias(
 			&pdev->dev, cell->parent_supplies,

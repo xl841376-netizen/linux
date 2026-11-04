@@ -17,6 +17,8 @@
 #include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
+#include <linux/pinctrl/consumer.h>
+#include <linux/gpio/consumer.h>
 #include <linux/soc/qcom/geni-se.h>
 #include <linux/spinlock.h>
 #include <linux/units.h>
@@ -142,6 +144,14 @@ struct geni_i2c_dev {
 	u32 num_msgs;
 	struct geni_i2c_gpi_multi_desc_xfer i2c_multi_desc_config;
 	const struct geni_i2c_desc *dev_data;
+	unsigned long xfer_timeout;
+	/* crux: 总线恢复 + 卡死冷却 */
+	struct pinctrl *pinctrl;
+	struct pinctrl_state *pins_default;
+	struct pinctrl_state *pins_gpio;
+	struct gpio_desc *scl_gpio;
+	struct gpio_desc *sda_gpio;
+	unsigned long wedged_until;
 };
 
 struct geni_i2c_err_log {
@@ -427,6 +437,55 @@ static irqreturn_t geni_i2c_irq(int irq, void *dev)
 	return IRQ_HANDLED;
 }
 
+/* crux: 总线恢复 —— 把总线脚切回 GPIO，SCL 打拍把从设备踢出，再切回 QUP。
+ * 对应原厂 i2c-msm-geni 的 recovery 做法（vendor 把 sleep 状态设成 function="gpio"）。
+ */
+static void geni_i2c_prepare_recovery(struct i2c_adapter *adap)
+{
+	struct geni_i2c_dev *gi2c = i2c_get_adapdata(adap);
+
+	if (!IS_ERR_OR_NULL(gi2c->pins_gpio))
+		pinctrl_select_state(gi2c->pinctrl, gi2c->pins_gpio);
+}
+
+static void geni_i2c_unprepare_recovery(struct i2c_adapter *adap)
+{
+	struct geni_i2c_dev *gi2c = i2c_get_adapdata(adap);
+
+	if (!IS_ERR_OR_NULL(gi2c->pins_default))
+		pinctrl_select_state(gi2c->pinctrl, gi2c->pins_default);
+}
+
+static void geni_i2c_set_scl(struct i2c_adapter *adap, int val)
+{
+	struct geni_i2c_dev *gi2c = i2c_get_adapdata(adap);
+
+	gpiod_set_value_cansleep(gi2c->scl_gpio, val);
+}
+
+static int geni_i2c_get_scl(struct i2c_adapter *adap)
+{
+	struct geni_i2c_dev *gi2c = i2c_get_adapdata(adap);
+
+	return gpiod_get_value_cansleep(gi2c->scl_gpio);
+}
+
+static int geni_i2c_get_sda(struct i2c_adapter *adap)
+{
+	struct geni_i2c_dev *gi2c = i2c_get_adapdata(adap);
+
+	return gpiod_get_value_cansleep(gi2c->sda_gpio);
+}
+
+static struct i2c_bus_recovery_info geni_i2c_recovery = {
+	.prepare_recovery = geni_i2c_prepare_recovery,
+	.unprepare_recovery = geni_i2c_unprepare_recovery,
+	.set_scl = geni_i2c_set_scl,
+	.get_scl = geni_i2c_get_scl,
+	.get_sda = geni_i2c_get_sda,
+	.recover_bus = i2c_generic_scl_recovery,
+};
+
 static void geni_i2c_abort_xfer(struct geni_i2c_dev *gi2c)
 {
 	unsigned long time_left = ABORT_TIMEOUT;
@@ -439,8 +498,17 @@ static void geni_i2c_abort_xfer(struct geni_i2c_dev *gi2c)
 	spin_unlock_irqrestore(&gi2c->lock, flags);
 
 	time_left = wait_for_completion_timeout(&gi2c->abort_done, time_left);
-	if (!time_left)
+	if (!time_left) {
 		dev_err(gi2c->se.dev, "Timeout abort_m_cmd\n");
+		/* crux: abort 也失败说明 SE 状态机已经废了。两点处理：
+		 * 1) 冷却 2 秒，期间的传输直接 -EIO，不再逐次等 cancel/abort；
+		 * 2) 硬复位 SE（关/开资源 + 重查时钟），把控制器拉回可用状态。
+		 */
+		gi2c->wedged_until = jiffies + 2 * HZ;
+		geni_se_resources_off(&gi2c->se);
+		geni_se_resources_on(&gi2c->se);
+		geni_i2c_clk_map_idx(gi2c);
+	}
 }
 
 static void geni_i2c_cancel_xfer(struct geni_i2c_dev *gi2c)
@@ -512,6 +580,27 @@ static void geni_i2c_tx_msg_cleanup(struct geni_i2c_dev *gi2c,
 	}
 }
 
+/*
+ * [crux] 按实际数据量算 xfer 超时（照 qcom 下游 i2c-msm-geni 做法）。
+ * 上游固定 1s（XFER_TIMEOUT=HZ），遇到 100kHz + 慢设备（bq27z561/cs35l41/
+ * aqt1000/smb1390）很容易误超时；误超时后走 cancel/abort，abort 再失败
+ * 整条总线就死住，表现为触摸/充电全线失联直到 lockup。
+ * 系数 10，保底 500ms。
+ */
+static void geni_i2c_calc_timeout(struct geni_i2c_dev *gi2c, size_t len)
+{
+	size_t bit_usec;
+	size_t xfer_max_usec;
+
+	if (!gi2c->clk_freq_out)
+		gi2c->clk_freq_out = I2C_MAX_STANDARD_MODE_FREQ;
+
+	bit_usec = (len * 9 * USEC_PER_SEC) / gi2c->clk_freq_out;
+	xfer_max_usec = (bit_usec * 10) + 500000;
+
+	gi2c->xfer_timeout = usecs_to_jiffies(xfer_max_usec);
+}
+
 static int geni_i2c_rx_one_msg(struct geni_i2c_dev *gi2c, struct i2c_msg *msg,
 				u32 m_param)
 {
@@ -542,7 +631,8 @@ static int geni_i2c_rx_one_msg(struct geni_i2c_dev *gi2c, struct i2c_msg *msg,
 	}
 
 	cur = gi2c->cur;
-	time_left = wait_for_completion_timeout(&gi2c->done, XFER_TIMEOUT);
+	geni_i2c_calc_timeout(gi2c, len);
+	time_left = wait_for_completion_timeout(&gi2c->done, gi2c->xfer_timeout);
 	if (!time_left || (gi2c->err && gi2c->err != gi2c_log[ADDR_NACK].err))
 		geni_i2c_cancel_xfer(gi2c);
 
@@ -584,7 +674,8 @@ static int geni_i2c_tx_one_msg(struct geni_i2c_dev *gi2c, struct i2c_msg *msg,
 		writel_relaxed(1, se->base + SE_GENI_TX_WATERMARK_REG);
 
 	cur = gi2c->cur;
-	time_left = wait_for_completion_timeout(&gi2c->done, XFER_TIMEOUT);
+	geni_i2c_calc_timeout(gi2c, len);
+	time_left = wait_for_completion_timeout(&gi2c->done, gi2c->xfer_timeout);
 	if (!time_left || (gi2c->err && gi2c->err != gi2c_log[ADDR_NACK].err))
 		geni_i2c_cancel_xfer(gi2c);
 
@@ -992,6 +1083,12 @@ static int geni_i2c_xfer(struct i2c_adapter *adap,
 	struct geni_i2c_dev *gi2c = i2c_get_adapdata(adap);
 	int ret;
 
+	/* crux: abort 失败后的冷却窗口内直接失败，避免每个传输都耗 2 秒 */
+	if (time_before(jiffies, gi2c->wedged_until)) {
+		dev_dbg(gi2c->se.dev, "bus wedged, fail fast\n");
+		return -EIO;
+	}
+
 	ret = pm_runtime_get_sync(gi2c->se.dev);
 	if (ret < 0) {
 		dev_err(gi2c->se.dev, "error turning SE resources:%d\n", ret);
@@ -1201,6 +1298,23 @@ static int geni_i2c_probe(struct platform_device *pdev)
 
 	i2c_set_adapdata(&gi2c->adap, gi2c);
 	gi2c->adap.dev.parent = dev;
+	/* crux: 可选总线恢复 —— 需要 DT 给 "gpio" pinctrl 状态 + scl/sda-gpios */
+	gi2c->pinctrl = devm_pinctrl_get(dev);
+	if (!IS_ERR(gi2c->pinctrl)) {
+		gi2c->pins_default = pinctrl_lookup_state(gi2c->pinctrl, "default");
+		gi2c->pins_gpio = pinctrl_lookup_state(gi2c->pinctrl, "gpio");
+		gi2c->scl_gpio = devm_gpiod_get_optional(dev, "scl", GPIOD_OUT_HIGH);
+		gi2c->sda_gpio = devm_gpiod_get_optional(dev, "sda", GPIOD_IN);
+		if (!IS_ERR_OR_NULL(gi2c->pins_gpio) &&
+		    !IS_ERR_OR_NULL(gi2c->scl_gpio) &&
+		    !IS_ERR_OR_NULL(gi2c->sda_gpio)) {
+			gi2c->adap.bus_recovery_info = &geni_i2c_recovery;
+			dev_info(dev, "bus recovery enabled\n");
+		} else {
+			dev_info(dev, "bus recovery not available\n");
+		}
+	}
+
 	gi2c->adap.dev.of_node = dev->of_node;
 	strscpy(gi2c->adap.name, "Geni-I2C", sizeof(gi2c->adap.name));
 

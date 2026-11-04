@@ -476,7 +476,8 @@ int parseBinFile(u8 *fw_data, int fw_size, Firmware *fwData, int keep_cx)
 					      FW_CX_VERSION], &fwData->cx_ver);
 
 		else {
-			pr_err("parseBinFile: Initialize cx_ver to default value!\n");
+			/* [crux] 该固件不带 sec2，用系统默认 cx_ver 是正常分支 */
+			pr_info("parseBinFile: Initialize cx_ver to default value!\n");
 			fwData->cx_ver = systemInfo.u16_cxVer;
 		}
 

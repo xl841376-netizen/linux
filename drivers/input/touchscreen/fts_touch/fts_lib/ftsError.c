@@ -342,7 +342,9 @@ int pollForErrorType(u8 *list, int size)
 			__func__, list[j]);
 		return list[j];
 	} else {
-		pr_err("%s: Error Type Not Found into ErrorList! ERROR %08X\n",
+		/* [crux] 固件上报的事件类型不在映射表里是正常情况（如 0x80000007），
+		 * 返回值仍按原逻辑给 ERROR_TIMEOUT，只是不再计入 error 日志。 */
+		pr_info("%s: Error Type Not Found into ErrorList! ERROR %08X\n",
 			__func__, ERROR_TIMEOUT);
 		return ERROR_TIMEOUT;
 	}

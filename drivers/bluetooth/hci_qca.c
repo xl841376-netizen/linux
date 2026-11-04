@@ -1288,7 +1288,15 @@ static int qca_recv(struct hci_uart *hu, const void *data, int count)
 				  qca_recv_pkts, ARRAY_SIZE(qca_recv_pkts));
 	if (IS_ERR(qca->rx_skb)) {
 		int err = PTR_ERR(qca->rx_skb);
-		bt_dev_err(hu->hdev, "Frame reassembly failed (%d)", err);
+
+		/* [crux] WCN3990 在上电后回第一个 vendor 命令时，会先吐一个
+		 * 非 H4 类型的字节，h4_recv_buf() 返回 -EILSEQ 并自动重同步，
+		 * 下一帧即为正确响应（实测 Product ID 等全部读出）。
+		 * 已确认与等待时序无关（上电等待 100ms/200ms 都会出现），
+		 * 属于芯片固有行为，故此处只按调试输出，不再当错误上报。
+		 */
+		if (err != -EILSEQ)
+			bt_dev_err(hu->hdev, "Frame reassembly failed (%d)", err);
 		qca->rx_skb = NULL;
 		return err;
 	}

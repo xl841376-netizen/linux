@@ -151,12 +151,14 @@ static int fts_sense_retry_cold(struct fts_ts_info *info);
 /* crux: IC health check, a watchdog-style fallback for a completely
  * silent IC which can no longer report ESD/watchdog events by itself.
  */
-#define FTS_HEALTH_CHECK_MS_DEFAULT		5000
+#define FTS_HEALTH_CHECK_MS_DEFAULT		0	/* crux: 与原厂对齐，默认不做周期轮询 */
 #define FTS_HEALTH_CHECK_FAIL_MAX_DEFAULT	3
 static unsigned int health_check_ms = FTS_HEALTH_CHECK_MS_DEFAULT;
 module_param(health_check_ms, uint, 0644);
 MODULE_PARM_DESC(health_check_ms, "IC health check period in ms, 0 disables (default 5000)");
 static unsigned int health_check_fail_max = FTS_HEALTH_CHECK_FAIL_MAX_DEFAULT;
+/* crux: resume 后只做一次握手校验，不进入周期轮询 */
+static bool health_oneshot;
 module_param(health_check_fail_max, uint, 0644);
 MODULE_PARM_DESC(health_check_fail_max, "Consecutive IC read failures before recovery (default 3)");
 static void fts_health_check_work(struct work_struct *work);
@@ -4440,16 +4442,17 @@ static int fts_fw_update(struct fts_ts_info *info)
 
 	if (init_type != SPECIAL_FULL_PANEL_INIT) {
 #if defined(PRE_SAVED_METHOD) || defined(COMPUTE_INIT_METHOD)
-		if ((systemInfo.u8_cfgAfeVer != systemInfo.u8_cxAfeVer)
-#ifdef COMPUTE_INIT_METHOD
-			|| ((systemInfo.u8_mpFlag != MP_FLAG_BOOT) &&
-				(systemInfo.u8_mpFlag != MP_FLAG_FACTORY))
-#endif
-			) {
+		/* [crux] This panel cannot persist mpFlag (SYS_CMD_MP_FLAG never
+		 * echoes), so the flag is out of the boot decision entirely.
+		 * FULL panel init is performed once by userspace via
+		 * /proc/fts/driver_test cmd 0x00 (crux-qmi touch init), and the
+		 * marker file it writes keeps later boots from repeating it.
+		 */
+		if (systemInfo.u8_cfgAfeVer != systemInfo.u8_cxAfeVer) {
 			init_type = SPECIAL_FULL_PANEL_INIT;
-			pr_err("%s: Different CX AFE Ver: %02X != %02X or invalid MpFlag = %02X... Execute FULL Panel Init!\n",
+			pr_err("%s: Different CX AFE Ver: %02X != %02X... Execute FULL Panel Init!\n",
 				__func__, systemInfo.u8_cfgAfeVer,
-				systemInfo.u8_cxAfeVer, systemInfo.u8_mpFlag);
+				systemInfo.u8_cxAfeVer);
 		} else
 #endif
 		if (systemInfo.u8_cfgAfeVer != systemInfo.u8_panelCfgAfeVer) {
@@ -4491,7 +4494,10 @@ out:
 			pr_info("%s: recovered after full cold restart\n", __func__);
 	}
 
-	pr_err("Fw Update Finished! error = %08X\n", error);
+	if (error < OK)
+		pr_err("Fw Update Finished! error = %08X\n", error);
+	else
+		pr_info("Fw Update Finished! error = %08X\n", error);
 	return error;
 }
 
@@ -5019,6 +5025,12 @@ static void fts_resume_work(struct work_struct *work)
 
 	info->resume_bit = 1;
 
+	/* crux 2026-10-31: 保留 system_reset —— 原厂 fts_521 的 fts_resume_work
+	 * (第 6059 行) 在这里同样调用它。有 reset_gpio 时它执行的是
+	 * "拉低 10ms + 拉高 + 等 EVT_ID_CONTROLLER_READY" 的硬复位脉冲，
+	 * 是 IC 从低功耗 / 主控切换状态回到 AP 的唯一握手；删掉会让 resume
+	 * 后的 IC 保持静默（实测中断计数锁死在 1）。
+	 */
 	fts_system_reset();
 
 	release_all_touches(info);
@@ -5034,9 +5046,12 @@ static void fts_resume_work(struct work_struct *work)
 
 	fts_enableInterrupt(true);
 
-	if (health_check_ms)
-		queue_delayed_work(info->event_wq, &info->health_work,
-				   msecs_to_jiffies(health_check_ms));
+	/* crux 2026-10-31: 不再周期守护。resume 后 200ms 做一次握手校验，
+	 * 失败则冷复位；周期轮询由 health_check_ms 控制，默认 0（关闭）。
+	 */
+	health_oneshot = true;
+	queue_delayed_work(info->event_wq, &info->health_work,
+			   msecs_to_jiffies(200));
 
 	complete_all(&info->bus_resumed);
 }
@@ -5055,7 +5070,7 @@ static void fts_health_check_work(struct work_struct *work)
 	u8 reg = 0;
 	int res;
 
-	if (!health_check_ms || !health_check_fail_max)
+	if (!health_check_fail_max)
 		return;
 
 	/* IC is asleep during suspend, do not touch the bus */
@@ -5096,6 +5111,16 @@ static void fts_health_check_work(struct work_struct *work)
 	}
 
 requeue:
+	/* crux: 一次性（resume 后握手）跑完即退出；仅当 health_check_ms > 0
+	 * 时才维持周期轮询。
+	 */
+	if (health_oneshot) {
+		health_oneshot = false;
+		if (!health_check_ms)
+			return;
+	}
+	if (!health_check_ms)
+		return;
 	queue_delayed_work(info->event_wq, &info->health_work,
 			   msecs_to_jiffies(health_check_ms));
 }
@@ -5125,9 +5150,10 @@ static void fts_suspend_work(struct work_struct *work)
 
 	fts_enableInterrupt(false);
 
-	/* Flush any outstanding touch events */
-	fts_system_reset();
-	flushFIFO();
+	/* crux 2026-10-31: 与原厂 fts_521 对齐 —— suspend 不复位 IC，只让它
+	 * 进低功耗。复位会使 resume 后 IC 处于半初始化状态（I2C 可答但不出
+	 * 事件），这正是此前需要周期健康检查兜底的根本原因。
+	 */
 
 	fts_set_switch_gpio(info, FTS_SWITCH_GPIO_VALUE_SLPI_MASTER);
 
@@ -5548,7 +5574,7 @@ static int parse_dt(struct device *dev, struct fts_hw_platform_data *bdata)
 		pr_info("bus_reg_name = %s\n", name);
 	}
 
-	if (of_property_read_bool(np, "st,reset-gpio")) {
+	if (of_property_present(np, "st,reset-gpio")) {
 		bdata->reset_gpio = crux_of_get_named_gpio(dev, "st,reset-gpio", 0);
 		pr_info("reset_gpio = %d\n", bdata->reset_gpio);
 	} else
@@ -5802,6 +5828,7 @@ static int fts_probe(struct spi_device *client)
 			     DISTANCE_MAX, 0, 0);
 #endif
 
+	#if 0 /* crux: disable key registration so libinput does not treat touchscreen as keyboard */
 #ifdef GESTURE_MODE
 	input_set_capability(info->input_dev, EV_KEY, KEY_WAKEUP);
 
@@ -5838,6 +5865,7 @@ static int fts_probe(struct spi_device *client)
 	input_set_capability(info->input_dev, EV_KEY, KEY_BACK);
 	input_set_capability(info->input_dev, EV_KEY, KEY_MENU);
 #endif
+	#endif /* crux: end disable key registration */
 
 	mutex_init(&info->diag_cmd_lock);
 
