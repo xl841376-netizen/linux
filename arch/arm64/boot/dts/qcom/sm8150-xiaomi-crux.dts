@@ -1204,6 +1204,17 @@
 
 /* [crux] PERST 脚的 pinctrl（照原厂 pcie1_perst_default） */
 &tlmm {
+	/* [crux 2026-11-02] i2c4(890000) 的 GPIO 状态：总线恢复时把脚从 qup4
+	 * 切回 gpio，SCL 打 9 拍把从设备踢出。引脚与原厂完全一致
+	 * (vendor qupv3_se4_i2c_active: gpio51/gpio52, function "qup4")。
+	 */
+	qup_i2c4_gpio: qup-i2c4-gpio-state {
+		pins = "gpio51", "gpio52";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-pull-up;
+	};
+
 	crux_pcie1_perst_default: crux-pcie1-perst-default {
 		perst-pins {
 			pins = "gpio102";
@@ -2196,7 +2207,15 @@
  * ============================================================================ */
 &i2c4 {
 	status = "okay";
+	/* [crux 2026-11-02] 总线恢复（bit-bang）暂不启用：pinctrl-msm 不允许
+	 * 同一设备对已在 pinctrl map 里的引脚再走 gpiod 申请
+	 * （pin GPIO_52 already requested by 890000.i2c ... cannot claim）。
+	 * 改由驱动侧的 "abort 后硬复位 SE + 2 秒冷却" 兜底（A+B）。
+	 * 将来要启用，把下面三行与 qup_i2c4_gpio 状态一起恢复即可。
+	 */
 };
+
+
 
 /* [crux 2026-10-17] modem 不自动启动：等 rmtfs/分区/pd-mapper 就绪后
  * 由 modem-start.service 通过 sysfs 启动（否则拿不到 EFS -> 启动即崩）。
@@ -2254,7 +2273,9 @@
 			compatible = "ramoops";
 			reg = <0x0 0xb0000000 0x0 0x400000>;
 			record-size = <0x100000>;
-			console-size = <0>;
+			/* crux: 原来 console-size=0，重启后拿不到上一次的内核日志；
+			 * 开 256KB 控制台缓冲，配合 cmdline 的 pstore.kmsg_bytes=262144 */
+			console-size = <0x40000>;
 			pmsg-size = <0>;
 			ecc-size = <0x10>;
 		};
