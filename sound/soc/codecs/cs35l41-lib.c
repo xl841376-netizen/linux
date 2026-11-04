@@ -1266,9 +1266,13 @@ int cs35l41_global_enable(struct device *dev, struct regmap *regmap, enum cs35l4
 		if (ret || enable)
 			return ret;
 
+		/* crux: PDN_DONE 在实测里会超过上游的 100ms 上限（放音正常，
+		 * 但 POST_PMD 报 -110）。放宽到 800ms，只影响真正的失败判定，
+		 * 不会让成功路径变慢（poll 命中即返回）。
+		 */
 		ret = regmap_read_poll_timeout(regmap, CS35L41_IRQ1_STATUS1,
 					int_status, int_status & pup_pdn_mask,
-					1000, 100000);
+					1000, 800000);
 		if (ret)
 			dev_err(dev, "Enable(%d) failed: %d\n", enable, ret);
 
@@ -1285,7 +1289,7 @@ int cs35l41_global_enable(struct device *dev, struct regmap *regmap, enum cs35l4
 
 		ret = regmap_read_poll_timeout(regmap, CS35L41_IRQ1_STATUS1,
 					int_status, int_status & pup_pdn_mask,
-					1000, 100000);
+					1000, 800000);
 		if (ret)
 			dev_err(dev, "Enable(%d) failed: %d\n", enable, ret);
 
@@ -1302,7 +1306,7 @@ int cs35l41_global_enable(struct device *dev, struct regmap *regmap, enum cs35l4
 				return ret;
 
 			ret = regmap_read_poll_timeout(regmap, CS35L41_IRQ1_STATUS1, int_status,
-				       int_status & CS35L41_PUP_DONE_MASK, 1000, 100000);
+				       int_status & CS35L41_PUP_DONE_MASK, 1000, 800000);
 			if (ret) {
 				dev_err(dev, "Failed waiting for CS35L41_PUP_DONE_MASK: %d\n", ret);
 				/* Lock the test key, it was unlocked during the multi_reg_write */
@@ -1331,7 +1335,7 @@ int cs35l41_global_enable(struct device *dev, struct regmap *regmap, enum cs35l4
 			}
 
 			ret = regmap_read_poll_timeout(regmap, CS35L41_IRQ1_STATUS1, int_status,
-				       int_status & CS35L41_PDN_DONE_MASK, 1000, 100000);
+				       int_status & CS35L41_PDN_DONE_MASK, 1000, 800000);
 			if (ret) {
 				dev_err(dev, "Failed waiting for CS35L41_PDN_DONE_MASK: %d\n", ret);
 				/* Lock the test key, it was unlocked during the multi_reg_write */

@@ -732,17 +732,9 @@ static const char * const cdc_if_tx10_mux_text[] = {
 	"ZERO", "DEC6", "DEC6_192"
 };
 
-static const char * const cdc_if_tx11_mux_text[] = {
-	"DEC_0_5", "DEC_9_12", "MAD_AUDIO", "MAD_BRDCST"
-};
-
 static const char * const cdc_if_tx11_inp1_mux_text[] = {
 	"ZERO", "DEC0", "DEC1", "DEC2", "DEC3", "DEC4",
 	"DEC5", "RX_MIX_TX5", "DEC9_10", "DEC11_12"
-};
-
-static const char * const cdc_if_tx13_mux_text[] = {
-	"CDC_DEC_5", "MAD_BRDCST"
 };
 
 static const char * const cdc_if_tx13_inp1_mux_text[] = {
@@ -1185,16 +1177,10 @@ static const struct soc_enum cdc_if_tx11_inp1_mux_enum =
 	SOC_ENUM_SINGLE(WCD934X_CDC_IF_ROUTER_TX_MUX_CFG3, 0,
 			ARRAY_SIZE(cdc_if_tx11_inp1_mux_text),
 			cdc_if_tx11_inp1_mux_text);
-static const struct soc_enum cdc_if_tx11_mux_enum =
-	SOC_ENUM_SINGLE(WCD934X_DATA_HUB_SB_TX11_INP_CFG, 0,
-			ARRAY_SIZE(cdc_if_tx11_mux_text), cdc_if_tx11_mux_text);
 static const struct soc_enum cdc_if_tx13_inp1_mux_enum =
 	SOC_ENUM_SINGLE(WCD934X_CDC_IF_ROUTER_TX_MUX_CFG3, 4,
 			ARRAY_SIZE(cdc_if_tx13_inp1_mux_text),
 			cdc_if_tx13_inp1_mux_text);
-static const struct soc_enum cdc_if_tx13_mux_enum =
-	SOC_ENUM_SINGLE(WCD934X_DATA_HUB_SB_TX13_INP_CFG, 0,
-			ARRAY_SIZE(cdc_if_tx13_mux_text), cdc_if_tx13_mux_text);
 
 static const struct wcd_mbhc_field wcd_mbhc_fields[WCD_MBHC_REG_FUNC_MAX] = {
 	WCD_MBHC_FIELD(WCD_MBHC_L_DET_EN, WCD934X_ANA_MBHC_MECH, 0x80),
@@ -3752,12 +3738,8 @@ static const struct snd_kcontrol_new cdc_if_tx9_mux =
 	SOC_DAPM_ENUM("CDC_IF TX9 MUX Mux", cdc_if_tx9_mux_enum);
 static const struct snd_kcontrol_new cdc_if_tx10_mux =
 	SOC_DAPM_ENUM("CDC_IF TX10 MUX Mux", cdc_if_tx10_mux_enum);
-static const struct snd_kcontrol_new cdc_if_tx11_mux =
-	SOC_DAPM_ENUM("CDC_IF TX11 MUX Mux", cdc_if_tx11_mux_enum);
 static const struct snd_kcontrol_new cdc_if_tx11_inp1_mux =
 	SOC_DAPM_ENUM("CDC_IF TX11 INP1 MUX Mux", cdc_if_tx11_inp1_mux_enum);
-static const struct snd_kcontrol_new cdc_if_tx13_mux =
-	SOC_DAPM_ENUM("CDC_IF TX13 MUX Mux", cdc_if_tx13_mux_enum);
 static const struct snd_kcontrol_new cdc_if_tx13_inp1_mux =
 	SOC_DAPM_ENUM("CDC_IF TX13 INP1 MUX Mux", cdc_if_tx13_inp1_mux_enum);
 
@@ -5606,12 +5588,8 @@ static const struct snd_soc_dapm_widget wcd934x_dapm_widgets[] = {
 			 &cdc_if_tx9_mux),
 	SND_SOC_DAPM_MUX("CDC_IF TX10 MUX", SND_SOC_NOPM, WCD934X_TX10, 0,
 			 &cdc_if_tx10_mux),
-	SND_SOC_DAPM_MUX("CDC_IF TX11 MUX", SND_SOC_NOPM, WCD934X_TX11, 0,
-			 &cdc_if_tx11_mux),
 	SND_SOC_DAPM_MUX("CDC_IF TX11 INP1 MUX", SND_SOC_NOPM, WCD934X_TX11, 0,
 			 &cdc_if_tx11_inp1_mux),
-	SND_SOC_DAPM_MUX("CDC_IF TX13 MUX", SND_SOC_NOPM, WCD934X_TX13, 0,
-			 &cdc_if_tx13_mux),
 	SND_SOC_DAPM_MUX("CDC_IF TX13 INP1 MUX", SND_SOC_NOPM, WCD934X_TX13, 0,
 			 &cdc_if_tx13_inp1_mux),
 	SND_SOC_DAPM_MIXER("AIF1_CAP Mixer", SND_SOC_NOPM, AIF1_CAP, 0,
@@ -5755,6 +5733,31 @@ static const struct snd_soc_dapm_route wcd934x_audio_map[] = {
 
 	{"SRC0", NULL, "IIR0"},
 	{"SRC1", NULL, "IIR1"},
+
+	/* [crux 2026-10-29] 这批 mux 主线只定义了控件与枚举文本、没有输入路由，
+	 * 被 dapm_new_mux() 当死控件报 “has no paths”。按枚举文本对应的真实源接上。
+	 */
+	{"RX INT0 MIX2 INP", "SRC0", "SRC0"},
+	{"RX INT0 MIX2 INP", "SRC1", "SRC1"},
+	{"RX INT1 MIX2 INP", "SRC0", "SRC0"},
+	{"RX INT1 MIX2 INP", "SRC1", "SRC1"},
+	{"RX INT2 MIX2 INP", "SRC0", "SRC0"},
+	{"RX INT2 MIX2 INP", "SRC1", "SRC1"},
+	{"RX INT3 MIX2 INP", "SRC0", "SRC0"},
+	{"RX INT3 MIX2 INP", "SRC1", "SRC1"},
+	{"RX INT4 MIX2 INP", "SRC0", "SRC0"},
+	{"RX INT4 MIX2 INP", "SRC1", "SRC1"},
+	{"RX INT7 MIX2 INP", "SRC0", "SRC0"},
+	{"RX INT7 MIX2 INP", "SRC1", "SRC1"},
+	{"CDC_IF TX9 MUX", "DEC7", "ADC MUX7"},
+	{"CDC_IF TX10 MUX", "DEC6", "ADC MUX6"},
+	{"CDC_IF TX11 INP1 MUX", "DEC0", "ADC MUX0"},
+	{"CDC_IF TX11 INP1 MUX", "DEC1", "ADC MUX1"},
+	{"CDC_IF TX11 INP1 MUX", "DEC2", "ADC MUX2"},
+	{"CDC_IF TX11 INP1 MUX", "DEC3", "ADC MUX3"},
+	{"CDC_IF TX11 INP1 MUX", "DEC4", "ADC MUX4"},
+	{"CDC_IF TX11 INP1 MUX", "DEC5", "ADC MUX5"},
+	{"CDC_IF TX13 INP1 MUX", "DEC5", "ADC MUX5"},
 };
 
 static int wcd934x_codec_set_jack(struct snd_soc_component *comp,
@@ -5834,7 +5837,13 @@ static int wcd934x_codec_parse_data(struct wcd934x_codec *wcd)
 	cfg->hs_thr = 1700;
 	cfg->hph_thr = 50;
 
-	wcd_dt_parse_mbhc_data(dev, cfg);
+	/* [crux 2026-10-29] MBHC 由 DT 关掉时不再解析 mbhc 的 DT 参数：
+	 * 没有意义，而且 wcd_dt_parse_mbhc_data() 会因缺按钮阈值打 dev_err。
+	 */
+	if (of_property_read_bool(dev->of_node, "qcom,mbhc-disabled"))
+		dev_info(dev, "[crux] MBHC disabled by DT, skip mbhc dt parse\n");
+	else
+		wcd_dt_parse_mbhc_data(dev, cfg);
 
 	return 0;
 }
