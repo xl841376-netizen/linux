@@ -59,6 +59,25 @@ static unsigned long __read_mostly sysctl_hung_task_check_interval_secs;
 
 static int __read_mostly sysctl_hung_task_warnings = 10;
 
+/*
+ * [crux 2026-10-29] 允许从内核命令行设置 hung_task 超时：
+ *	hung_task_timeout_secs=20
+ * 主线没有这个参数，写进 cmdline 只会被当成未知参数丢掉（启动日志报
+ * "Unknown kernel command line parameters"），只能开机后再用 sysctl 改。
+ * 这里补上解析，让启动时就能生效。0 表示禁用检测（与 sysctl 语义一致）。
+ */
+static int __init hung_task_timeout_secs_setup(char *str)
+{
+	unsigned long val;
+
+	if (kstrtoul(str, 0, &val))
+		return 1;
+
+	sysctl_hung_task_timeout_secs = val;
+	return 1;
+}
+__setup("hung_task_timeout_secs=", hung_task_timeout_secs_setup);
+
 static int __read_mostly did_panic;
 static bool hung_task_call_panic;
 

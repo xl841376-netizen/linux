@@ -669,6 +669,14 @@ int ufshcd_pltfrm_init(struct platform_device *pdev,
 
 	hba->vops = vops;
 
+	/* [crux] dev_set_drvdata() 必须在任何会让 runtime PM 回调进来的操作之前。
+	 * 下面的 pm_runtime_get_sync(dev) 会在 GDSC 已关时触发
+	 * genpd_runtime_resume -> ufshcd_runtime_resume(dev)，那里 dev_get_drvdata(dev)
+	 * 若还是 NULL 就变成空指针（实测 ufshcd_resume+0x14 读 hba->is_powered，
+	 * 偏移 0x230）。ufshcd_init() 里虽然会再设一次，但那时已经太晚。
+	 */
+	dev_set_drvdata(dev, hba);
+
 	err = ufshcd_parse_clock_info(hba);
 	if (err) {
 		dev_err(dev, "%s: clock parse failed %d\n",
@@ -698,13 +706,20 @@ int ufshcd_pltfrm_init(struct platform_device *pdev,
 	 * Ported from the 6.17 crux tree (verified there).
 	 */
 	pm_runtime_set_active(dev);
-	pm_runtime_enable(dev);
+	/* [crux] 该设备可能因 deferred probe 重复进 probe（实测第一轮失败、
+	 * 0.3s 后再来一轮）。第二轮若再 enable 一次就会打
+	 * "Unbalanced pm_runtime_enable!"，所以这里只在未开启时才开；
+	 * 并且失败退出时把 get_sync 的引用还回去，不留引用/开关不平衡。
+	 */
+	if (!pm_runtime_enabled(dev))
+		pm_runtime_enable(dev);
 	pm_runtime_get_sync(dev);
 
 	err = ufshcd_init(hba, mmio_base, irq);
 	if (err) {
 		dev_err_probe(dev, err, "Initialization failed with error %d\n",
 			      err);
+		pm_runtime_put_noidle(dev);
 		return err;
 	}
 

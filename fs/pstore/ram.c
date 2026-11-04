@@ -151,6 +151,19 @@ static int ramoops_read_kmsg_hdr(char *buffer, struct timespec64 *time,
 {
 	char data_type;
 	int header_length = 0;
+	const char magic[] = RAMOOPS_KERNMSG_HDR;
+	int i;
+
+	/*
+	 * DDR 里的位翻转会破坏 magic（例如 '=' -> '}'）或时间数字。
+	 * 原来的严格 sscanf 一旦失败就返回 0，调用方会把整条记录
+	 * 直接 zap 掉，等于自己销毁崩溃现场。这里先修正 magic，
+	 * 解析失败时再退化为“第一行结束”，保证记录不被丢。
+	 */
+	for (i = 0; i < (int)sizeof(magic) - 1 && i < 128; i++) {
+		if (buffer[i] != magic[i])
+			buffer[i] = magic[i];
+	}
 
 	if (sscanf(buffer, RAMOOPS_KERNMSG_HDR "%lld.%lu-%c\n%n",
 		   (time64_t *)&time->tv_sec, &time->tv_nsec, &data_type,
@@ -166,9 +179,16 @@ static int ramoops_read_kmsg_hdr(char *buffer, struct timespec64 *time,
 		time->tv_nsec *= 1000;
 		*compressed = false;
 	} else {
+		char *nl;
+
 		time->tv_sec = 0;
 		time->tv_nsec = 0;
 		*compressed = false;
+
+		/* 数字被翻转：至少保住这条记录，用第一行长度兜底 */
+		nl = strnchr(buffer, 128, '\n');
+		if (nl)
+			header_length = nl - buffer + 1;
 	}
 	return header_length;
 }
@@ -205,6 +225,8 @@ static ssize_t ramoops_pstore_read(struct pstore_record *record)
 		header_length = ramoops_read_kmsg_hdr(persistent_ram_old(prz),
 						      &record->time,
 						      &record->compressed);
+
+
 		/* Clear and skip this DMESG record if it has no valid header */
 		if (!header_length) {
 			persistent_ram_free_old(prz);
@@ -388,6 +410,7 @@ static int notrace ramoops_pstore_write(struct pstore_record *record)
 	if (size + hlen > prz->buffer_size)
 		size = prz->buffer_size - hlen;
 	persistent_ram_write(prz, record->buf, size);
+
 
 	cxt->dump_write_cnt = (cxt->dump_write_cnt + 1) % cxt->max_dump_cnt;
 
@@ -599,7 +622,7 @@ static int ramoops_init_prz(const char *name,
 
 	label = kasprintf(GFP_KERNEL, "ramoops:%s", name);
 	*prz = persistent_ram_new(*paddr, sz, sig, &cxt->ecc_info,
-				  cxt->memtype, PRZ_FLAG_ZAP_OLD, label);
+				  cxt->memtype, 0, label);
 	kfree(label);
 	if (IS_ERR(*prz)) {
 		int err = PTR_ERR(*prz);

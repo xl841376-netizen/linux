@@ -1561,10 +1561,14 @@ static int __ref kernel_init(void *unused)
 	 * Wait until kthreadd is all set-up.
 	 */
 	wait_for_completion(&kthreadd_done);
+	pr_emerg("CRUX| init: kthreadd ready\n");
 
 	kernel_init_freeable();
+	pr_emerg("CRUX| init: freeable done\n");
+	pr_emerg("CRUX| init: async_sync begin\n");
 	/* need to finish all async __init code before freeing the memory */
 	async_synchronize_full();
+	pr_emerg("CRUX| init: async_sync done\n");
 
 	system_state = SYSTEM_FREEING_INITMEM;
 	kprobe_free_init_mem();
@@ -1573,6 +1577,7 @@ static int __ref kernel_init(void *unused)
 	exit_boot_config();
 	free_initmem();
 	mark_readonly();
+	pr_emerg("CRUX| init: rodata done\n");
 
 	/*
 	 * Kernel mappings are now finalized - update the userspace page-table
@@ -1588,6 +1593,7 @@ static int __ref kernel_init(void *unused)
 	do_sysctl_args();
 
 	if (ramdisk_execute_command) {
+		pr_emerg("CRUX| init: exec %s\n", ramdisk_execute_command);
 		ret = run_init_process(ramdisk_execute_command);
 		if (!ret)
 			return 0;
@@ -1661,9 +1667,11 @@ static noinline void __init kernel_init_freeable(void)
 
 	init_mm_internals();
 
+	pr_emerg("CRUX| freeable: pre-smp initcalls begin\n");
 	do_pre_smp_initcalls();
 	lockup_detector_init();
 
+	pr_emerg("CRUX| freeable: smp_init begin\n");
 	smp_init();
 	sched_init_smp();
 
@@ -1672,12 +1680,17 @@ static noinline void __init kernel_init_freeable(void)
 	padata_init();
 	page_alloc_init_late();
 
+	pr_emerg("CRUX| freeable: do_basic_setup begin\n");
 	do_basic_setup();
+	pr_emerg("CRUX| freeable: do_basic_setup done\n");
 
 	kunit_run_all_tests();
 
 	wait_for_initramfs();
+	pr_emerg("CRUX| freeable: initramfs unpacked\n");
+	pr_emerg("CRUX| freeable: console_on_rootfs begin\n");
 	console_on_rootfs();
+	pr_emerg("CRUX| freeable: console_on_rootfs done\n");
 
 	/*
 	 * check if there is an early userspace init.  If yes, let it do all
@@ -1690,7 +1703,9 @@ static noinline void __init kernel_init_freeable(void)
 			pr_warn("check access for rdinit=%s failed: %i, ignoring\n",
 				ramdisk_execute_command, ramdisk_command_access);
 		ramdisk_execute_command = NULL;
+		pr_emerg("CRUX| freeable: prepare_namespace begin\n");
 		prepare_namespace();
+		pr_emerg("CRUX| freeable: prepare_namespace done\n");
 	}
 
 	/*
@@ -1702,5 +1717,7 @@ static noinline void __init kernel_init_freeable(void)
 	 * and default modules
 	 */
 
+	pr_emerg("CRUX| freeable: integrity keys begin\n");
 	integrity_load_keys();
+	pr_emerg("CRUX| freeable: integrity keys done\n");
 }

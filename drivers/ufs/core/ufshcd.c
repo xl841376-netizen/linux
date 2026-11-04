@@ -31,6 +31,7 @@
 #include <scsi/scsi_driver.h>
 #include <scsi/scsi_eh.h>
 #include <scsi/scsi_tcq.h>
+#include <linux/crux_dep.h>
 #include "ufshcd-priv.h"
 #include <ufs/ufs_quirks.h>
 #include <ufs/unipro.h>
@@ -9528,6 +9529,13 @@ static int ufshcd_probe_hba(struct ufs_hba *hba, bool init_dev_params)
 	if (hba->ee_usr_mask)
 		ufshcd_write_ee_control(hba);
 	ufshcd_configure_auto_hibern8(hba);
+
+	/* [crux] 存储就绪契约：分区从这里开始可读。
+	 * 注意固件不走这里——X50 的 sbl1.mbn、adsp.mbn、ipa_fws.mbn、触摸
+	 * ftm5_fw.ftb 都是 CONFIG_EXTRA_FIRMWARE 编进内核镜像的。
+	 * 这一位只服务于真正要读分区的消费者：EFS/PDC/modemst 等数据面。
+	 */
+	crux_dep_set("ufs", CRUX_DEP_UP);
 
 	return 0;
 }

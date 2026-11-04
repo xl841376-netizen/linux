@@ -241,10 +241,10 @@ static int persistent_ram_init_ecc(struct persistent_ram_zone *prz,
 	numerr = persistent_ram_decode_rs8(prz, buffer, sizeof(*buffer),
 					   prz->par_header);
 	if (numerr > 0) {
-		pr_info("error in header, %d\n", numerr);
+		pr_debug("error in header, %d\n", numerr);
 		prz->corrected_bytes += numerr;
 	} else if (numerr < 0) {
-		pr_info_ratelimited("uncorrectable error in header\n");
+		pr_debug_ratelimited("uncorrectable error in header\n");
 		prz->bad_blocks++;
 	}
 
@@ -549,6 +549,9 @@ static int persistent_ram_post_init(struct persistent_ram_zone *prz, u32 sig,
 				buffer_size(prz), buffer_start(prz));
 			zap = true;
 		} else {
+			if (prz->corrected_bytes || prz->bad_blocks)
+				pr_warn("ramoops %s: recovered old buffer with ECC: corrected %zu bytes, %zu bad blocks\n",
+					prz->label, prz->corrected_bytes, prz->bad_blocks);
 			pr_debug("found existing buffer, size %zu, start %zu\n",
 				 buffer_size(prz), buffer_start(prz));
 			persistent_ram_save_old(prz);

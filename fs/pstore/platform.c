@@ -23,6 +23,7 @@
 #include <linux/uaccess.h>
 #include <linux/jiffies.h>
 #include <linux/vmalloc.h>
+#include <linux/io.h>
 #include <linux/workqueue.h>
 #include <linux/zlib.h>
 
@@ -274,6 +275,15 @@ void pstore_record_init(struct pstore_record *record,
  * callback from kmsg_dump. Save as much as we can (up to kmsg_bytes) from the
  * end of the buffer.
  */
+/* crux: panic-path diagnostics, marks written to IMEM 0x146BF800 */
+static void __iomem *crux_pst_dbg;
+static void crux_pst_mark(u32 v)
+{
+	pr_emerg("PSTDBG:%08x\n", v);
+	if (crux_pst_dbg)
+		writel(v, crux_pst_dbg);
+}
+
 static void pstore_dump(struct kmsg_dumper *dumper,
 			struct kmsg_dump_detail *detail)
 {
@@ -285,17 +295,23 @@ static void pstore_dump(struct kmsg_dumper *dumper,
 	unsigned long	flags = 0;
 	int		saved_ret = 0;
 	int		ret;
+	bool		locked = false;
 
 	why = kmsg_dump_reason_str(detail->reason);
+	crux_pst_mark(0xDB000000u | (u32)detail->reason);
 
 	if (pstore_cannot_block_path(detail->reason)) {
-		if (!raw_spin_trylock_irqsave(&psinfo->buf_lock, flags)) {
-			pr_err("dump skipped in %s path because of concurrent dump\n",
-					in_nmi() ? "NMI" : why);
-			return;
+		if (raw_spin_trylock_irqsave(&psinfo->buf_lock, flags)) {
+			locked = true;
+		} else {
+			/* crux: other CPUs are stopped in panic; a stuck lock on a
+			 * stopped CPU must not make us lose the crash log.
+			 */
+			crux_pst_mark(0xDB0000F1u);
 		}
 	} else {
 		raw_spin_lock_irqsave(&psinfo->buf_lock, flags);
+		locked = true;
 	}
 
 	kmsg_dump_rewind(&iter);
@@ -326,8 +342,11 @@ static void pstore_dump(struct kmsg_dumper *dumper,
 
 		/* Write dump contents. */
 		if (!kmsg_dump_get_buffer(&iter, true, dst + header_size,
-					  dst_size, &dump_size))
+					  dst_size, &dump_size)) {
+			crux_pst_mark(0xDB000003u);
 			break;
+		}
+		crux_pst_mark(0xDB000002u);
 
 		if (big_oops_buf) {
 			zipped_len = pstore_compress(dst, psinfo->buf,
@@ -353,6 +372,7 @@ static void pstore_dump(struct kmsg_dumper *dumper,
 		}
 
 		ret = psinfo->write(&record);
+		crux_pst_mark(0xDB000004u | (((u32)ret & 0xFFu) << 8));
 		if (ret == 0 && detail->reason == KMSG_DUMP_OOPS) {
 			pstore_new_entry = 1;
 			pstore_timer_kick();
@@ -365,7 +385,8 @@ static void pstore_dump(struct kmsg_dumper *dumper,
 		total += record.size;
 		part++;
 	}
-	raw_spin_unlock_irqrestore(&psinfo->buf_lock, flags);
+	if (locked)
+		raw_spin_unlock_irqrestore(&psinfo->buf_lock, flags);
 
 	if (saved_ret) {
 		pr_err_once("backend (%s) writing error (%d)\n", psinfo->name,
@@ -420,7 +441,7 @@ static void pstore_register_console(void)
 	 * Always initialize flags here since prior unregister_console()
 	 * calls may have changed settings (specifically CON_ENABLED).
 	 */
-	pstore_console.flags = CON_PRINTBUFFER | CON_ENABLED | CON_ANYTIME;
+	pstore_console.flags = CON_ENABLED | CON_ANYTIME;
 	register_console(&pstore_console);
 }
 
@@ -746,6 +767,8 @@ static void pstore_timefunc(struct timer_list *unused)
 static int __init pstore_init(void)
 {
 	int ret;
+
+	crux_pst_dbg = ioremap(0x146BF800, 0x10);
 
 	ret = pstore_init_fs();
 	if (ret)
