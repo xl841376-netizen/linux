@@ -307,6 +307,9 @@ static int qcom_pmic_typec_pdphy_pd_transmit(struct tcpc_dev *tcpc,
 	struct device *dev = pmic_typec_pdphy->dev;
 	int ret;
 
+	dev_err(dev, "pd_transmit: type=%d msg=%s rev=%u\n", type,
+		msg ? "payload" : "signal", negotiated_rev);
+
 	if (msg) {
 		ret = qcom_pmic_typec_pdphy_pd_transmit_payload(pmic_typec_pdphy,
 								type, msg,
@@ -318,7 +321,7 @@ static int qcom_pmic_typec_pdphy_pd_transmit(struct tcpc_dev *tcpc,
 	}
 
 	if (ret)
-		dev_dbg(dev, "pd_transmit: type %x result %d\n", type, ret);
+		dev_err(dev, "pd_transmit: type %x result %d\n", type, ret);
 
 	return ret;
 }
@@ -358,6 +361,8 @@ static void qcom_pmic_typec_pdphy_pd_receive(struct pmic_typec_pdphy *pmic_typec
 	if (ret)
 		goto done;
 
+	dev_err(dev, "pd_receive: size=%u rx_status=%u rc=%d\n", size, rx_status, ret);
+
 	/* Return ownership of RX buffer to hardware */
 	ret = regmap_write(pmic_typec_pdphy->regmap,
 			   pmic_typec_pdphy->base + USB_PDPHY_RX_ACKNOWLEDGE_REG, 0);
@@ -382,20 +387,25 @@ static irqreturn_t qcom_pmic_typec_pdphy_isr(int irq, void *dev_id)
 		dev_err(dev, "isr: tx_sig\n");
 		break;
 	case PMIC_PDPHY_SIG_RX_IRQ:
+		dev_err(dev, "isr: rx_sig\n");
 		schedule_work(&pmic_typec_pdphy->reset_work);
 		break;
 	case PMIC_PDPHY_MSG_TX_IRQ:
+		dev_err(dev, "isr: msg_tx\n");
 		tcpm_pd_transmit_complete(pmic_typec_pdphy->tcpm_port,
 					  TCPC_TX_SUCCESS);
 		break;
 	case PMIC_PDPHY_MSG_RX_IRQ:
+		dev_err(dev, "isr: msg_rx\n");
 		qcom_pmic_typec_pdphy_pd_receive(pmic_typec_pdphy);
 		break;
 	case PMIC_PDPHY_MSG_TX_FAIL_IRQ:
+		dev_err(dev, "isr: msg_tx_fail\n");
 		tcpm_pd_transmit_complete(pmic_typec_pdphy->tcpm_port,
 					  TCPC_TX_FAILED);
 		break;
 	case PMIC_PDPHY_MSG_TX_DISCARD_IRQ:
+		dev_err(dev, "isr: msg_tx_discard\n");
 		tcpm_pd_transmit_complete(pmic_typec_pdphy->tcpm_port,
 					  TCPC_TX_DISCARDED);
 		break;
@@ -515,8 +525,11 @@ static int qcom_pmic_typec_pdphy_start(struct pmic_typec *tcpm,
 	int ret;
 
 	ret = regulator_enable(pmic_typec_pdphy->vdd_pdphy);
-	if (ret)
+	if (ret) {
+		dev_err(pmic_typec_pdphy->dev, "pdphy_start: vdd enable fail %d\n", ret);
 		return ret;
+	}
+	dev_err(pmic_typec_pdphy->dev, "pdphy_start: enter\n");
 
 	pmic_typec_pdphy->tcpm_port = tcpm_port;
 

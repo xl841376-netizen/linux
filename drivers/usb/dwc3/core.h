@@ -699,6 +699,9 @@ struct dwc3_event_buffer {
 	unsigned int		lpos;
 	unsigned int		count;
 	unsigned int		flags;
+	/* crux: event ring overrun accounting + deferred interrupt re-open */
+	unsigned int		overrun;
+	struct delayed_work	unmask_work;
 
 #define DWC3_EVENT_PENDING	BIT(0)
 

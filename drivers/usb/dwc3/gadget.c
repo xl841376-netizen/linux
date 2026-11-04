@@ -4673,9 +4673,43 @@ static irqreturn_t dwc3_check_event_buf(struct dwc3_event_buffer *evt)
 		return IRQ_NONE;
 
 	if (count > evt->length) {
-		dev_err_ratelimited(dwc->dev, "invalid count(%u) > evt->length(%u)\n",
-			count, evt->length);
-		return IRQ_NONE;
+		/*
+		 * crux: the hardware wrote past the event ring and GEVNTCOUNT
+		 * holds a bogus value (seen: count=0x1004 with a 4K ring).
+		 * The register is only cleared by writing to it and the
+		 * peripheral interrupt is level-triggered, so simply bailing
+		 * out here re-enters this handler at full speed until a CPU
+		 * hard-locks. Mask, drain, drop the ring contents, then let a
+		 * short delayed work re-open the interrupt.
+		 */
+		u32 drain = count;
+		int i;
+
+		dwc3_writel(dwc, DWC3_GEVNTSIZ(0),
+			    DWC3_GEVNTSIZ_INTMASK |
+			    DWC3_GEVNTSIZ_SIZE(evt->length));
+
+		for (i = 0; i < 2 && drain; i++) {
+			dwc3_writel(dwc, DWC3_GEVNTCOUNT(0), drain);
+			drain = dwc3_readl(dwc, DWC3_GEVNTCOUNT(0));
+			drain &= DWC3_GEVNTCOUNT_MASK;
+		}
+
+		evt->count = 0;
+		evt->lpos = 0;
+		evt->flags &= ~DWC3_EVENT_PENDING;
+		wmb();
+
+		evt->overrun++;
+		if (evt->overrun <= 3 || !(evt->overrun % 32))
+			dev_err(dwc->dev,
+				"event ring overrun: count(%u) > length(%u), dropped (total %u)\n",
+				count, evt->length, evt->overrun);
+
+		schedule_delayed_work(&evt->unmask_work,
+				      msecs_to_jiffies(evt->overrun > 3 ? 100 : 20));
+
+		return IRQ_HANDLED;
 	}
 
 	evt->count = count;

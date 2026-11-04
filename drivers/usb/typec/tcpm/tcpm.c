@@ -918,6 +918,12 @@ static void tcpm_log_source_caps(struct tcpm_port *port)
 	for (i = 0; i < port->nr_source_caps; i++) {
 		u32 pdo = port->source_caps[i];
 		enum pd_pdo_type type = pdo_type(pdo);
+
+		pr_info("cxpd: src[%u] pdo=%08x type=%d mv=%u-%u ma=%u mw=%u\n",
+			i, pdo, type, pdo_min_voltage(pdo), pdo_max_voltage(pdo),
+			type == PDO_TYPE_BATT ? 0 : pdo_max_current(pdo),
+			type == PDO_TYPE_BATT ? pdo_max_power(pdo) :
+			(pdo_max_current(pdo) * pdo_min_voltage(pdo) / 1000));
 		char msg[64];
 
 		switch (type) {
@@ -4149,6 +4155,11 @@ static void tcpm_pd_ext_msg_request(struct tcpm_port *port,
 
 static void tcpm_pd_rx_handler(struct kthread_work *work)
 {
+	struct pd_rx_event *ev0 = container_of(work, struct pd_rx_event, work);
+	struct tcpm_port *port0 = ev0->port;
+
+	pr_info("cxpd: rx msg hdr=%04x state=%d pd_capable=%d\n",
+		le16_to_cpu(ev0->msg.header), port0->state, port0->pd_capable);
 	struct pd_rx_event *event = container_of(work,
 						 struct pd_rx_event, work);
 	const struct pd_message *msg = &event->msg;
@@ -4524,6 +4535,8 @@ static int tcpm_pd_select_pdo(struct tcpm_port *port, int *sink_pdo,
 					max_mw = src_mw;
 					max_mv = min_src_mv;
 					ret = 0;
+					pr_info("cxpd: choose src[%d] sink[%d] %umV %umA %umW\n",
+						i, j, min_src_mv, src_ma, src_mw);
 				}
 			}
 		}
@@ -4545,6 +4558,10 @@ static int tcpm_pd_select_pdo(struct tcpm_port *port, int *sink_pdo,
 
 	if (port->usb_type != POWER_SUPPLY_USB_TYPE_PD)
 		power_supply_changed(port->psy);
+
+	pr_info("cxpd: select done ret=%d nr_src=%d nr_snk=%d pps=%d\n",
+		ret, port->nr_source_caps, port->nr_snk_pdo,
+		port->pps_data.supported);
 
 	return ret;
 }
@@ -5835,6 +5852,7 @@ static void run_state_machine(struct tcpm_port *port)
 		tcpm_set_state(port, unattached_state(port), 0);
 		break;
 	case SNK_WAIT_CAPABILITIES:
+		pr_info("cxpd: enter SNK_WAIT_CAPABILITIES\n");
 		ret = port->tcpc->set_pd_rx(port->tcpc, true);
 		if (ret < 0) {
 			tcpm_set_state(port, SNK_READY, 0);
@@ -5882,6 +5900,8 @@ static void run_state_machine(struct tcpm_port *port)
 				       port->timings.sink_wait_cap_time);
 		break;
 	case SNK_NEGOTIATE_CAPABILITIES:
+		pr_info("cxpd: enter SNK_NEGOTIATE_CAPABILITIES nr_src=%d\n",
+			port->nr_source_caps);
 		port->pd_capable = true;
 		tcpm_set_partner_usb_comm_capable(port,
 						  !!(port->source_caps[0] & PDO_FIXED_USB_COMM));

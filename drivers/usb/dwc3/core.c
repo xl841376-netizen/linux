@@ -466,6 +466,26 @@ static void dwc3_ref_clk_period(struct dwc3 *dwc)
 }
 
 /**
+ * dwc3_event_unmask_work - re-open the event interrupt after an overrun
+ * @work: delayed work embedded in the event buffer
+ *
+ * crux: when GEVNTCOUNT reports garbage (hardware wrote past the ring),
+ * the level-triggered interrupt must be masked while the bogus pending
+ * count is drained, otherwise the handler re-enters forever and a CPU
+ * hard-locks. This work re-opens the interrupt shortly afterwards
+ * instead of doing it inline.
+ */
+static void dwc3_event_unmask_work(struct work_struct *work)
+{
+	struct dwc3_event_buffer *evt =
+		container_of(work, struct dwc3_event_buffer, unmask_work.work);
+	struct dwc3 *dwc = evt->dwc;
+
+	dwc3_writel(dwc, DWC3_GEVNTSIZ(0),
+		    DWC3_GEVNTSIZ_SIZE(evt->length));
+}
+
+/**
  * dwc3_free_one_event_buffer - Frees one event buffer
  * @dwc: Pointer to our controller context structure
  * @evt: Pointer to event buffer to be freed
@@ -473,6 +493,7 @@ static void dwc3_ref_clk_period(struct dwc3 *dwc)
 static void dwc3_free_one_event_buffer(struct dwc3 *dwc,
 		struct dwc3_event_buffer *evt)
 {
+	cancel_delayed_work_sync(&evt->unmask_work);
 	dma_free_coherent(dwc->sysdev, evt->length, evt->buf, evt->dma);
 }
 
@@ -495,6 +516,7 @@ static struct dwc3_event_buffer *dwc3_alloc_one_event_buffer(struct dwc3 *dwc,
 
 	evt->dwc	= dwc;
 	evt->length	= length;
+	INIT_DELAYED_WORK(&evt->unmask_work, dwc3_event_unmask_work);
 	evt->cache	= devm_kzalloc(dwc->dev, length, GFP_KERNEL);
 	if (!evt->cache)
 		return ERR_PTR(-ENOMEM);
