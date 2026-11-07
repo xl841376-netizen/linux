@@ -162,3 +162,4 @@ ssh root@192.168.2.2          # USB ECM 备用
 |---|---|---|
 | **外挂 X50 基带 / SIM** | 未完成，且**默认不启用** | 控制面已统一走 **`crux-ctl` 引擎**（`/usr/local/lib/crux-ctl/`，QMI over QRTR；`crux-ctl rawqmi` 发原始 QMI，`x50:` 前缀选 node3）。14 个 X50 systemd 单元已于 2026-11-07 全部删除（备份 `/root/archives/x50-units-20261107.tar.gz`），脚本保留给引擎 `x50up` 按需调用。X50 本身仍**从未枚举成功**（`17cb:0305` 未出现），开关 `/etc/crux-modem.conf` 的 `X50_ENABLE=0`。内置 X24 的 SIM 链路 READY/registered 已于 2026-11-02 验证；当前两个物理槽均无卡（槽1 硬件损坏、槽2 空） |
 | **摄像头** | 未支持 | 无可用通路：设备树里没有 camera/cci 节点，内核未使能 camss，dmesg 无相关探测 |
+| **GPU CCU translation fault（非周期类）** | **暂不处理** | 已落地三件套：Mesa BO 延迟释放（quarantine）、a640 errata128（draw 前 WFI5）、overfetch 抑制 + fault 延迟复位。残留约 1~2 次/分、偶发 hangcheck recover（画面顿一下）。在拿到提交侧证据（谁在 cmdstream 里写了这个 iova）之前不再投入；重启条件与排查入口见记忆 09 和 `crux-gpu-triage` |
