@@ -555,7 +555,11 @@ static const struct file_operations crux_setmux_fops = {
     .write = crux_setmux_write,
 };
 
-static const struct file_operations crux_mux_fops = { .write = crux_mux_write };
+static const struct file_operations crux_mux_fops = {
+    .owner = THIS_MODULE,
+    .open  = simple_open,
+    .write = crux_mux_write,
+};
 
 static ssize_t te_pin_read(struct file *f, char __user *u, size_t n, loff_t *o)
 {
