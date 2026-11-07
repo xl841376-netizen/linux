@@ -8,7 +8,8 @@
  *   - /sys/kernel/debug/crux_te_sync/stats  立即抓一次；
  *   - /sys/kernel/debug/crux_te_sync/te_pin 采样 gpio8(TE) 电平 1 秒，统计高电平比例。
  *
- * 窗口：DPU INTF_1 = 0xae01000(mdp) + 0x6a800；DSI0 ctrl = 0xae94000；TLMM = 0x3100000
+ * 窗口：DPU INTF_1 = 0xae01000(mdp) + 0x6a800；DSI0 ctrl = 0xae94000；
+ *       TLMM = 0x3900000（north tile！gpio8 属于 north，不是 0x3100000/west）
  */
 #include <linux/module.h>
 #include <linux/platform_device.h>
@@ -18,13 +19,16 @@
 #include <linux/delay.h>
 #include <linux/ktime.h>
 #include <linux/jiffies.h>
+#include <linux/suspend.h>
+#include <linux/pm_runtime.h>
+#include <linux/device.h>
 
 #define CRUX_INTF1_PHYS  0xae6b800UL
 #define CRUX_INTF1_SIZE  0x300
 #define CRUX_DSI0_PHYS   0xae94000UL
 #define CRUX_DSI0_SIZE   0x1000
-#define CRUX_TLMM_PHYS   0x3100000UL
-#define CRUX_TLMM_SIZE   0x1000
+#define CRUX_TLMM_PHYS   0x3900000UL /* [crux 2026-11-07] north tile：gpio8 在 north，之前写成 west(0x3100000) 是错的 */
+#define CRUX_TLMM_SIZE   0x10000 /* [crux 2026-11-07] 必须覆盖 gpio8 的 0x8000 偏移；原来只映射 0x1000 是越界读 */
 #define TLMM_GPIO8_CTL   0x8000
 #define TLMM_MUX_MASK    0x3c  /* bits2-5 = 功能选择 */
 #define TLMM_FUNC_GPIO   0
@@ -69,9 +73,11 @@
 
 struct crux_te {
     struct device *dev;
+    struct device *dpu_dev;    /* [crux 2026-11-06] DPU 平台设备，用它的 runtime PM 判活 */
     void __iomem *intf;
     void __iomem *dsi;
-    void __iomem *tlmm;
+    void __iomem *tlmm;       /* = tiles[NORTH]，gpio8 所在 */
+    void __iomem *tiles[4];   /* [crux 2026-11-07] west/east/north/south */
     void __iomem *gop;
     u32 crux_mux_saved;
     bool crux_mux_gpio;
@@ -80,6 +86,15 @@ struct crux_te {
     struct dentry *dbg;
     struct delayed_work work;
     unsigned long last_warn;   /* [crux2026-10-11] 异常上报节流用 */
+
+    /*
+     * [crux 2026-11-05] suspend 期间禁止采样。
+     * 2026-11-04 23:53:26 的 synchronous external abort（pc: crux_te_work+0x2c）
+     * 就是 suspend 时 DSI/INTF 已下电、而 20ms 轮询还在读寄存器。
+     * 用 pm_notifier 在“设备真正 suspend 之前”就停掉 work。
+     */
+    bool suspended;
+    struct notifier_block pm_nb;
 
     /*
      * [crux 2026-10-12] 速率统计：从 TEAR 读指针换算“面板实际帧率”。
@@ -96,6 +111,56 @@ struct crux_te {
 };
 
 static struct crux_te *g_te;
+
+/*
+ * [crux 2026-11-06] 寄存器读取闸门（第二版）。
+ *
+ * 现场证据（journalctl -b -1, 01:42:26）：
+ *   Internal error: synchronous external abort ... Workqueue: events crux_te_work
+ *   pc : crux_te_work+0x50
+ * 那次不是 hangcheck recover，而是**屏幕 blank（DPMS off）**：DPU 整块进入
+ * runtime suspend，INTF/DSI 断电，20ms 轮询还在读 -> abort。
+ *
+ * 实测判据（2026-11-06 01:50 验证）：
+ *   DSI dpms On  -> /sys/.../ae01000.display-controller/power/runtime_status = active
+ *   DSI dpms Off -> 同一文件 = suspended
+ * 所以只要"拿到 DPU 的 runtime PM 引用"才读寄存器，就能同时覆盖
+ * blank / suspend / 复位后下电 三种情况；读不到引用就跳过这一轮。
+ */
+extern bool msm_display_hw_unavailable(void);
+extern void msm_display_hw_commit_done(void);
+
+#define CRUX_DPU_DEV_NAME "ae01000.display-controller"
+
+/* 成功拿到引用返回 true（调用方读完必须 crux_hw_put） */
+static bool crux_hw_get(struct crux_te *t)
+{
+    if (READ_ONCE(t->suspended))
+        return false;
+    if (msm_display_hw_unavailable())
+        return false;
+    if (!t->dpu_dev)
+        return false;
+    /* 返回 0 表示 DPU 已 runtime suspend，寄存器不可碰 */
+    if (pm_runtime_get_if_active(t->dpu_dev) <= 0)
+        return false;
+    return true;
+}
+
+static void crux_hw_put(struct crux_te *t)
+{
+    pm_runtime_put(t->dpu_dev);
+}
+
+/* 调试口拒绝读时只打印一次，避免刷屏 */
+static void crux_warn_unavailable(struct crux_te *t, const char *file)
+{
+    if (time_after(jiffies, t->last_warn + 10 * HZ)) {
+        t->last_warn = jiffies;
+        pr_warn("[crux-te] %s: 显示控制器复位中/已下电，拒绝读 INTF/DSI 寄存器（防 external abort）\n",
+                file);
+    }
+}
 
 /*
  * [crux 2026-10-11] 日志分流：默认只在“明确异常”时打印。
@@ -264,6 +329,11 @@ static ssize_t rate_read(struct file *f, char __user *u, size_t n, loff_t *o)
     if (!t || !t->intf)
         return -ENODEV;
 
+    if (!crux_hw_get(t)) {
+        crux_warn_unavailable(t, "rate");
+        return -EIO;
+    }
+
     spin_lock_irqsave(&t->rate_lock, flags);
     l1 = t->lines_total; f1 = t->frames_total; s1 = t->samples; vt = t->vtotal;
     spin_unlock_irqrestore(&t->rate_lock, flags);
@@ -307,6 +377,7 @@ static ssize_t rate_read(struct file *f, char __user *u, size_t n, loff_t *o)
         edges, hi, lo,
         (unsigned long long)(te_mhz / 1000), (unsigned long long)(te_mhz % 1000));
 
+    crux_hw_put(t);
     return simple_read_from_buffer(u, n, o, buf, len);
 }
 
@@ -323,6 +394,11 @@ static ssize_t stats_read(struct file *f, char __user *u, size_t n, loff_t *o)
 
     if (!t)
         return -ENODEV;
+
+    if (!crux_hw_get(t)) {
+        crux_warn_unavailable(t, "stats");
+        return -EIO;
+    }
 
     len = scnprintf(buf, sizeof(buf),
         "intf1@%08lx dsi0@%08lx\n"
@@ -343,6 +419,7 @@ static ssize_t stats_read(struct file *f, char __user *u, size_t n, loff_t *o)
         rd(t->dsi, D_CTRL), rd(t->dsi, D_CMD_CFG0),
         rd(t->dsi, D_CMD_MDP_CTRL2), rd(t->dsi, D_ERR_INT_MASK0),\
         rd(t->tlmm, TLMM_GPIO8_CTL), rd(t->tlmm, TLMM_GPIO8_IO));
+    crux_hw_put(t);
     return simple_read_from_buffer(u, n, o, buf, len);
 }
 
@@ -376,6 +453,11 @@ static ssize_t crux_mux_write(struct file *f, const char __user *u, size_t n, lo
     if (kstrtou32(buf, 0, &v))
         return -EINVAL;
 
+    if (!crux_hw_get(t)) {
+        crux_warn_unavailable(t, "muxgpio");
+        return -EIO;
+    }
+
     if (v && !t->crux_mux_gpio) {
         t->crux_mux_saved = rd(t->tlmm, TLMM_GPIO8_CTL);
         iowrite32((t->crux_mux_saved & ~TLMM_MUX_MASK) | TLMM_FUNC_GPIO,
@@ -387,8 +469,91 @@ static ssize_t crux_mux_write(struct file *f, const char __user *u, size_t n, lo
         t->crux_mux_gpio = false;
         pr_info("[crux-te] gpio8 mux restored -> %08x\n", t->crux_mux_saved);
     }
+    crux_hw_put(t);
     return n;
 }
+
+static ssize_t crux_setmux_write(struct file *f, const char __user *u,
+                                 size_t n, loff_t *o)
+{
+    struct crux_te *t = f->private_data;
+    char buf[8];
+    u32 v, cur;
+
+    if (!t || !t->tlmm)
+        return -ENODEV;
+    if (n == 0 || n >= sizeof(buf))
+        return -EINVAL;
+    if (copy_from_user(buf, u, n))
+        return -EFAULT;
+    buf[n] = 0;
+    if (kstrtou32(buf, 0, &v))
+        return -EINVAL;
+    if (v > 15)
+        return -EINVAL;
+
+    if (!crux_hw_get(t)) {
+        crux_warn_unavailable(t, "setmux");
+        return -EIO;
+    }
+
+    cur = rd(t->tlmm, TLMM_GPIO8_CTL);
+    iowrite32((cur & ~TLMM_MUX_MASK) | ((v << 2) & TLMM_MUX_MASK),
+              t->tlmm + TLMM_GPIO8_CTL);
+    pr_info("[crux-te] gpio8 mux: %08x -> func %u (%08x)\n",
+            cur, v, rd(t->tlmm, TLMM_GPIO8_CTL));
+    crux_hw_put(t);
+    return n;
+}
+
+/*
+ * [crux 2026-11-07] 逐 tile 读某个 pin 的 CTL/IO，用于验证四个 tile 的
+ * 地址映射是否和 pinctrl 的视图一致。写 "tile pin"，tile: 0=west 1=east 2=north 3=south。
+ */
+static ssize_t crux_pinread_write(struct file *f, const char __user *u,
+                                  size_t n, loff_t *o)
+{
+    struct crux_te *t = f->private_data;
+    char buf[24];
+    int tile, pin;
+    u32 ctl, io;
+
+    if (!t)
+        return -ENODEV;
+    if (n == 0 || n >= sizeof(buf))
+        return -EINVAL;
+    if (copy_from_user(buf, u, n))
+        return -EFAULT;
+    buf[n] = 0;
+    if (sscanf(buf, "%d %d", &tile, &pin) != 2)
+        return -EINVAL;
+    if (tile < 0 || tile > 3 || pin < 0 || pin > 175)
+        return -EINVAL;
+
+    if (!crux_hw_get(t)) {
+        crux_warn_unavailable(t, "pinread");
+        return -EIO;
+    }
+    ctl = rd(t->tiles[tile], 0x1000 * pin);
+    io  = rd(t->tiles[tile], 0x1000 * pin + 4);
+    crux_hw_put(t);
+
+    pr_info("[crux-te] tile%d pin%d: ctl=%08x (mux=%u) io=%08x\n",
+            tile, pin, ctl, (ctl >> 2) & 0xf, io);
+    return n;
+}
+
+static const struct file_operations crux_pinread_fops = {
+    .owner = THIS_MODULE,
+    .open  = simple_open,
+    .write = crux_pinread_write,
+};
+
+static const struct file_operations crux_setmux_fops = {
+    .owner = THIS_MODULE,
+    .open  = simple_open,
+    .write = crux_setmux_write,
+};
 
 static const struct file_operations crux_mux_fops = { .write = crux_mux_write };
 
@@ -402,6 +567,10 @@ static ssize_t te_pin_read(struct file *f, char __user *u, size_t n, loff_t *o)
 
     if (!t || !t->tlmm)
         return -ENODEV;
+    if (!crux_hw_get(t)) {
+        crux_warn_unavailable(t, "te_pin");
+        return -EIO;
+    }
 
     start = ktime_get_ns();
     while (ktime_get_ns() - start < 1000000000ULL) {
@@ -415,6 +584,7 @@ static ssize_t te_pin_read(struct file *f, char __user *u, size_t n, loff_t *o)
     len = scnprintf(buf, sizeof(buf),
         "gpio8: hi=%u lo=%u total=%u ratio_ppm=%u\n",
         hi, lo, hi + lo, (hi + lo) ? (u32)((u64)hi * 1000000 / (hi + lo)) : 0);
+    crux_hw_put(t);
     return simple_read_from_buffer(u, n, o, buf, len);
 }
 
@@ -477,11 +647,61 @@ static void crux_te_work(struct work_struct *w)
 {
     struct crux_te *t = container_of(to_delayed_work(w), struct crux_te, work);
 
+    /*
+     * suspend 里 DSI/INTF 已断电；hangcheck recover 之后到下一次成功提交之前
+     * 同样断电。两种情况读寄存器都会 synchronous external abort。
+     */
+    if (!crux_hw_get(t))
+        goto requeue;
+
     /* [crux 2026-10-12] 20ms 一次采样（算行率），每 100 次（2s）再做一次变更检测 */
     crux_sample(t);
     if ((t->samples % 100) == 0)
         crux_dump(t);
-    schedule_delayed_work(&t->work, msecs_to_jiffies(20));
+    crux_hw_put(t);
+
+requeue:
+    if (!t->suspended)
+        schedule_delayed_work(&t->work, msecs_to_jiffies(20));
+}
+
+/*
+ * [crux 2026-11-05] 在设备 suspend 之前就停掉轮询。
+ * PM_SUSPEND_PREPARE 早于所有设备的 ->suspend 回调，所以显示还没断电；
+ * 用 dev_pm_ops 的话要赌我们和 DSI/DPU 的 suspend 顺序，赌错就是 abort。
+ */
+static int crux_te_pm_notify(struct notifier_block *nb, unsigned long action, void *data)
+{
+    struct crux_te *t = container_of(nb, struct crux_te, pm_nb);
+
+    switch (action) {
+    case PM_SUSPEND_PREPARE:
+    case PM_HIBERNATION_PREPARE:
+        WRITE_ONCE(t->suspended, true);
+        cancel_delayed_work_sync(&t->work);
+        break;
+    case PM_POST_SUSPEND:
+    case PM_POST_HIBERNATION:
+        WRITE_ONCE(t->suspended, false);
+        schedule_delayed_work(&t->work, msecs_to_jiffies(200));
+        break;
+    default:
+        break;
+    }
+    return NOTIFY_OK;
+}
+
+
+/* [crux 2026-11-07] 只映射、不 request_mem_region：
+ * TLMM/INTF/DSI 这些窗口已经被 pinctrl/dpu/dsi 驱动占用，
+ * devm_platform_ioremap_resource_byname() 会 -EBUSY。 */
+static void __iomem *crux_map_by_name(struct platform_device *pdev, const char *name)
+{
+    struct resource *res = platform_get_resource_byname(pdev, IORESOURCE_MEM, name);
+
+    if (!res)
+        return ERR_PTR(-ENODEV);
+    return devm_ioremap(&pdev->dev, res->start, resource_size(res));
 }
 
 static int crux_te_probe(struct platform_device *pdev)
@@ -493,16 +713,43 @@ static int crux_te_probe(struct platform_device *pdev)
         return -ENOMEM;
     t->dev = &pdev->dev;
 
-    t->intf = devm_ioremap(&pdev->dev, CRUX_INTF1_PHYS, CRUX_INTF1_SIZE);
-    if (!t->intf)
-        return -ENOMEM;
-    t->dsi = devm_ioremap(&pdev->dev, CRUX_DSI0_PHYS, CRUX_DSI0_SIZE);
-    if (!t->dsi)
-        return -ENOMEM;
-    t->tlmm = devm_ioremap(&pdev->dev, CRUX_TLMM_PHYS, CRUX_TLMM_SIZE);
-    if (!t->tlmm)
-        return -ENOMEM;
+    /*
+     * [crux 2026-11-07] 窗口全部从 DT 的 reg/reg-names 取。
+     * 之前硬编码：tile 写错（west 当成 north）+ 映射长度不足（0x1000
+     * 覆盖不了 gpio8 的 0x8000 偏移），导致读到窗口外的假数据。
+     * 现在缺窗口直接 probe 失败，换板子/换实例会立刻暴露。
+     */
+    t->intf = crux_map_by_name(pdev, "intf1");
+    if (IS_ERR(t->intf))
+        return PTR_ERR(t->intf);
+    t->dsi = crux_map_by_name(pdev, "dsi0");
+    if (IS_ERR(t->dsi))
+        return PTR_ERR(t->dsi);
+    t->tiles[0] = crux_map_by_name(pdev, "tlmm-west");
+    if (IS_ERR(t->tiles[0]))
+        return PTR_ERR(t->tiles[0]);
+    t->tiles[1] = crux_map_by_name(pdev, "tlmm-east");
+    if (IS_ERR(t->tiles[1]))
+        return PTR_ERR(t->tiles[1]);
+    t->tiles[2] = crux_map_by_name(pdev, "tlmm-north");
+    if (IS_ERR(t->tiles[2]))
+        return PTR_ERR(t->tiles[2]);
+    t->tiles[3] = crux_map_by_name(pdev, "tlmm-south");
+    if (IS_ERR(t->tiles[3]))
+        return PTR_ERR(t->tiles[3]);
+    t->tlmm = t->tiles[2];   /* gpio8 在 north tile */
     t->gop = devm_ioremap(&pdev->dev, CRUX_GOP_PHYS, CRUX_GOP_SIZE);
+    if (!t->gop)
+        return -ENOMEM;
+
+    /*
+     * [crux 2026-11-06] 拿住 DPU 的引用：后面所有寄存器读取都靠它的
+     * runtime PM 状态判活（blank/suspend 时它会是 suspended）。
+     */
+    t->dpu_dev = bus_find_device_by_name(&platform_bus_type, NULL,
+                                         CRUX_DPU_DEV_NAME);
+    if (!t->dpu_dev)
+        return -EPROBE_DEFER;
 
     platform_set_drvdata(pdev, t);
     g_te = t;
@@ -514,9 +761,13 @@ static int crux_te_probe(struct platform_device *pdev)
     debugfs_create_file("rate", 0444, t->dbg, t, &rate_fops);
     debugfs_create_file("te_pin", 0444, t->dbg, t, &te_pin_fops);
     debugfs_create_file("muxgpio", 0200, t->dbg, t, &crux_mux_fops);
+    debugfs_create_file("setmux", 0200, t->dbg, t, &crux_setmux_fops);
+    debugfs_create_file("pinread", 0200, t->dbg, t, &crux_pinread_fops);
     debugfs_create_file("gop", 0444, t->dbg, t, &gop_fops);
 
     INIT_DELAYED_WORK(&t->work, crux_te_work);
+    t->pm_nb.notifier_call = crux_te_pm_notify;
+    register_pm_notifier(&t->pm_nb);
     schedule_delayed_work(&t->work, msecs_to_jiffies(1000));
 
     dev_info(&pdev->dev, "[crux-te] observer ready (intf1 %#lx, dsi0 %#lx, tlmm %#lx)\n",
@@ -530,8 +781,13 @@ static void crux_te_remove(struct platform_device *pdev)
 
     if (!t)
         return;
+    unregister_pm_notifier(&t->pm_nb);
     cancel_delayed_work_sync(&t->work);
     debugfs_remove_recursive(t->dbg);
+    if (t->dpu_dev) {
+        put_device(t->dpu_dev);
+        t->dpu_dev = NULL;
+    }
     g_te = NULL;
 }
 

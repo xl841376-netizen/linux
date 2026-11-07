@@ -50,6 +50,22 @@ static int msm_gem_open(struct drm_gem_object *obj, struct drm_file *file)
 static void put_iova_spaces(struct drm_gem_object *obj, struct drm_gpuvm *vm,
 			    bool close, const char *reason);
 
+/*
+ * [crux 2026-11-07] close 时的 fence 等待上限。
+ *
+ * 原来的 MAX_SCHEDULE_TIMEOUT 是无限等待：一旦 GPU 出 fault 导致 job 永远
+ * 不完成，任何 close 这个 BO 的进程都会永久卡在 D 状态（现场：plasmashell
+ * 栈 dma_resv_wait_timeout <- msm_gem_close，hung_task 报 blocked 241s，
+ * SIGKILL 也杀不掉）。
+ *
+ * 改成有上限：超时说明 GPU 已经挂了，继续 unmap 并打警告，宁可冒一次 fault
+ * 的风险，也不能把用户态进程锁死。
+ */
+static unsigned int crux_close_wait_ms = 2000;
+module_param_named(close_fence_timeout_ms, crux_close_wait_ms, uint, 0644);
+MODULE_PARM_DESC(close_fence_timeout_ms,
+	"close 时等 GPU fence 的上限（毫秒，0=一直等；默认 2000）");
+
 static void msm_gem_close(struct drm_gem_object *obj, struct drm_file *file)
 {
 	struct msm_context *ctx = file->driver_priv;
@@ -78,8 +94,19 @@ static void msm_gem_close(struct drm_gem_object *obj, struct drm_file *file)
 	 * TODO we might need to kick this to a queue to avoid blocking
 	 * in CLOSE ioctl
 	 */
-	dma_resv_wait_timeout(obj->resv, DMA_RESV_USAGE_BOOKKEEP, false,
-			      MAX_SCHEDULE_TIMEOUT);
+	if (crux_close_wait_ms) {
+		long ret = dma_resv_wait_timeout(obj->resv,
+				DMA_RESV_USAGE_BOOKKEEP, false,
+				msecs_to_jiffies(crux_close_wait_ms));
+
+		if (ret == 0)
+			DRM_DEV_ERROR(obj->dev->dev,
+				"msm_gem_close: 等 GPU fence 超时 %ums（GPU 可能已挂），继续 unmap 0x%llx\n",
+				crux_close_wait_ms, (u64)(uintptr_t)obj);
+	} else {
+		dma_resv_wait_timeout(obj->resv, DMA_RESV_USAGE_BOOKKEEP,
+				      false, MAX_SCHEDULE_TIMEOUT);
+	}
 
 	msm_gem_lock_vm_and_obj(&exec, obj, ctx->vm);
 	put_iova_spaces(obj, ctx->vm, true, "close");

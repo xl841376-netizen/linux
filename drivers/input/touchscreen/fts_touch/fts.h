@@ -396,6 +396,10 @@ struct fts_ts_info {
 	struct input_dev        *input_dev;	/* Input device structure */
 
 	struct work_struct suspend_work;	/* Suspend work thread */
+	struct work_struct baseline_work;	/* [crux] 亮屏后关基线自适应 */
+	bool water_mode;			/* [crux] IC 当前是否在水膜模式 */
+	struct delayed_work water_recover_work;	/* [crux] 水膜卡住的恢复 */
+	unsigned int water_recover_tries;	/* [crux] 连续恢复次数 */
 	struct work_struct resume_work;	/* Resume work thread */
 	struct workqueue_struct *event_wq;	/* Used for event handler, */
 						/* suspend, resume threads */

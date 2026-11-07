@@ -33,6 +33,7 @@ struct msm_vma_trace_ent {
 	const char *op;
 	u32 pid;
 	char comm[16];
+	unsigned long when;	/* [crux] jiffies，用于"最近释放"判定 */
 };
 
 static struct msm_vma_trace_ent msm_vma_trace[MSM_VMA_TRACE_N];
@@ -56,7 +57,51 @@ static void msm_vma_trace_add(const char *op, u64 iova, u64 range)
 	e->op = op;
 	e->pid = task_pid_nr(current);
 	strscpy(e->comm, current->comm, sizeof(e->comm));
+	e->when = jiffies;
 }
+
+/*
+ * [crux 2026-11-07] 给 GPU fault 分类，照商业版 KGSL 的两条抑制思路：
+ *   1 = fault 落在"刚被释放"的区间内部      -> 真 UAF（商业版只记 premature free）
+ *   2 = fault 落在刚释放区间末尾 64B 以内    -> UCHE overfetch（商业版直接抑制）
+ * 只统计最近 MSM_VMA_TRACE_WINDOW 内的释放记录。
+ */
+#define MSM_VMA_TRACE_WINDOW	(5 * HZ)
+
+int msm_gem_vma_trace_classify(u64 iova, u64 *start, u64 *end,
+			       u32 *pid, char comm[16])
+{
+	unsigned int idx = (unsigned int)atomic_read(&msm_vma_trace_idx);
+	int k;
+
+	for (k = 1; k <= MSM_VMA_TRACE_N; k++) {
+		struct msm_vma_trace_ent *e =
+			&msm_vma_trace[(idx - k) & (MSM_VMA_TRACE_N - 1)];
+
+		if (!e->op)
+			break;
+		if (time_after(jiffies, e->when + MSM_VMA_TRACE_WINDOW))
+			break;
+
+		if (iova >= e->iova && iova < e->iova + e->range) {
+			*start = e->iova;
+			*end = e->iova + e->range;
+			*pid = e->pid;
+			memcpy(comm, e->comm, 16);
+			return 1;	/* 区间内部：真 UAF */
+		}
+		if (iova >= e->iova + e->range &&
+		    iova < e->iova + e->range + 64) {
+			*start = e->iova;
+			*end = e->iova + e->range;
+			*pid = e->pid;
+			memcpy(comm, e->comm, 16);
+			return 2;	/* 末尾 64B 内：overfetch */
+		}
+	}
+	return 0;
+}
+EXPORT_SYMBOL_GPL(msm_gem_vma_trace_classify);
 
 void msm_gem_vma_trace_dump(unsigned long fault_iova)
 {
@@ -64,7 +109,12 @@ void msm_gem_vma_trace_dump(unsigned long fault_iova)
 	bool any = false;
 	int k;
 
-	pr_warn("*** vma trace for fault iova=0x%lx ***\n", fault_iova);
+	/*
+	 * [crux 2026-11-06] 对齐商业版 KGSL 的 "premature free" 输出：
+	 * fault 地址如果落在刚被 unmap/close 掉的区间里，说明是
+	 * "buffer 先被释放、GPU 还在读"，直接把释放者 pid/comm 和区间打出来。
+	 */
+	pr_warn("*** GPU PAGE FAULT: iova=0x%lx ***\n", fault_iova);
 
 	for (k = 1; k <= MSM_VMA_TRACE_N; k++) {
 		struct msm_vma_trace_ent *e =
@@ -73,15 +123,17 @@ void msm_gem_vma_trace_dump(unsigned long fault_iova)
 		if (!e->op)
 			break;
 		if (fault_iova >= e->iova && fault_iova < e->iova + e->range) {
-			pr_warn("  HIT %s pid=%u comm=%s 0x%llx-0x%llx\n",
-				e->op, e->pid, e->comm, e->iova,
-				e->iova + e->range);
+			pr_warn("---- premature free ----\n");
+			pr_warn("  [%llx-%llx] (%s) 已被 pid %u comm=%s 释放 %d 次操作之前\n",
+				e->iova, e->iova + e->range, e->op, e->pid,
+				e->comm, k - 1);
 			any = true;
+			break;
 		}
 	}
 
 	if (!any) {
-		pr_warn("  (no entry covers it; 10 most recent ops:)\n");
+		pr_warn("  (no entry covers it; 10 most recent releases:)\n");
 		for (k = 1; k <= 10; k++) {
 			struct msm_vma_trace_ent *e =
 				&msm_vma_trace[(idx - k) & (MSM_VMA_TRACE_N - 1)];

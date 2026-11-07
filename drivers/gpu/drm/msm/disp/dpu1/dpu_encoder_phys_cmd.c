@@ -389,11 +389,14 @@ static void dpu_encoder_phys_cmd_tearcheck_config(
 				(mode->vtotal * drm_mode_vrefresh(mode));
 
 	/*
-	 * Set the sync_cfg_height to twice vtotal so that if we lose a
-	 * TE event coming from the display TE pin we won't stall immediately
+	 * [crux 2026-11-07] 对齐原厂 sde_encoder_phys_cmd_tearcheck_config()：
+	 * TE 已实测正常（gpio8/mdp_vsync，占空比 ~0.5%），所以改成"只等外部 TE"：
+	 *   hw_vsync_mode = 0       —— 用外部 TE，不用内部 hw vsync
+	 *   sync_cfg_height = 0xFFF0 —— 关掉 SDE 自产的 TE，强制等面板 TE
+	 * 原主线的 vtotal*2 是"丢 TE 时用内部定时器兜底"，会让帧不等 TE 就写 GRAM。
 	 */
-	tc_cfg.hw_vsync_mode = 1;
-	tc_cfg.sync_cfg_height = mode->vtotal * 2;
+	tc_cfg.hw_vsync_mode = 0;
+	tc_cfg.sync_cfg_height = 0xFFF0;
 	tc_cfg.vsync_init_val = mode->vdisplay;
 	tc_cfg.sync_threshold_start = DEFAULT_TEARCHECK_SYNC_THRESH_START;
 	tc_cfg.sync_threshold_continue = DEFAULT_TEARCHECK_SYNC_THRESH_CONTINUE;

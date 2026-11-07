@@ -11,6 +11,12 @@
 #include <linux/debugfs.h>
 #include <linux/ktime.h>
 #include <linux/bits.h>
+#include <linux/module.h>
+
+/* crux: 每 60 个 frame-done 打一行，dmesg 时间戳即可算出屏幕实际帧率 */
+static bool fps_log;
+module_param(fps_log, bool, 0644);
+MODULE_PARM_DESC(fps_log, "Log frame-done counter every 60 frames (for FPS measurement)");
 
 #include <drm/drm_atomic.h>
 #include <drm/drm_blend.h>
@@ -33,6 +39,12 @@
 #include "dpu_vbif.h"
 #include "dpu_core_perf.h"
 #include "dpu_trace.h"
+
+/*
+ * [crux 2026-11-06] 由 msm_gpu.c 提供：hangcheck recover 之后、下一次成功提交
+ * 之前，DPU 的 INTF/DSI 寄存器块不可读（读会 synchronous external abort）。
+ */
+extern void msm_display_hw_commit_done(void);
 
 /* layer mixer index on dpu_crtc */
 #define LEFT_MIXER 0
@@ -729,6 +741,12 @@ void dpu_crtc_frame_event_cb(struct drm_crtc *crtc, u32 event)
 
 	trace_dpu_crtc_frame_event_cb(DRMID(crtc), event);
 
+	if (fps_log && (event & DPU_ENCODER_FRAME_EVENT_DONE)) {
+		u64 n = (u64)atomic64_inc_return(&dpu_crtc->fps_frames);
+		if (!(n % 60))
+			pr_info("dpu-fps: crtc%d frames=%llu\n", crtc_id, n);
+	}
+
 	spin_lock_irqsave(&dpu_crtc->spin_lock, flags);
 	fevent = list_first_entry_or_null(&dpu_crtc->frame_event_list,
 			struct dpu_crtc_frame_event, list);
@@ -954,6 +972,12 @@ static void dpu_crtc_atomic_flush(struct drm_crtc *crtc,
 				crtc->base.id, crtc->state->enable);
 		return;
 	}
+
+	/*
+	 * [crux 2026-11-06] 有一帧真的要被编程进硬件了：解除 hangcheck recover
+	 * 设置的"寄存器不可读"闸门（见 msm_gpu.c:msm_display_hw_unavailable）。
+	 */
+	msm_display_hw_commit_done();
 
 	DRM_DEBUG_ATOMIC("crtc%d\n", crtc->base.id);
 

@@ -147,6 +147,9 @@ static int fts_mode_handler(struct fts_ts_info *info, int force);
 
 static int fts_chip_initialization(struct fts_ts_info *info, int init_type);
 static int fts_sense_retry_cold(struct fts_ts_info *info);
+static int fts_set_baseline_adaptation(struct fts_ts_info *info, bool enable);
+static void fts_baseline_work(struct work_struct *work);
+static void fts_water_recover_work(struct work_struct *work);
 
 /* crux: IC health check, a watchdog-style fallback for a completely
  * silent IC which can no longer report ESD/watchdog events by itself.
@@ -2780,13 +2783,11 @@ static ssize_t ic_recover_store(struct device *dev,
 		return count;
 	}
 
-	pr_info("%s: manual recovery requested, power cycling the IC\n",
+	pr_info("%s: manual recovery requested, full cold restart\n",
 		__func__);
 	release_all_touches(info);
-	fts_cold_boot_hw_reset(info);
-	fts_system_reset();
-	fts_mode_handler(info, 0);
-	fts_enableInterrupt(true);
+	/* [crux 2026-11-07] 原厂掉电后走完整 re-init；只 system reset 拉不回上报引擎 */
+	fts_sense_retry_cold(info);
 	info->health_fail_cnt = 0;
 
 	if (health_check_ms)
@@ -3359,6 +3360,18 @@ static bool fts_status_event_handler(struct fts_ts_info *info, unsigned
 		break;
 
 	case EVT_TYPE_STATUS_WATER:
+		/* [crux 2026-11-07] 记录水膜模式：0x00~0x02 进入，0x03~0x05 离开。
+		 * 进入后 5 秒没退出，就强制校准把基线拉正（IC 停止上报的根因）。
+		 */
+		if (event[2] <= 0x02) {
+			info->water_mode = true;
+			schedule_delayed_work(&info->water_recover_work,
+					      msecs_to_jiffies(5000));
+		} else if (event[2] <= 0x05) {
+			info->water_mode = false;
+			info->water_recover_tries = 0;
+			cancel_delayed_work(&info->water_recover_work);
+		}
 		switch (event[2]) {
 		case 0x00:
 			pr_info("%s: Water Mode Entry by BLD with real"
@@ -4494,6 +4507,10 @@ out:
 			pr_info("%s: recovered after full cold restart\n", __func__);
 	}
 
+	/* [crux 2026-11-07] 开机先关基线自适应，防止漂移后误判进水膜模式 */
+	if (error >= OK)
+		fts_set_baseline_adaptation(info, false);
+
 	if (error < OK)
 		pr_err("Fw Update Finished! error = %08X\n", error);
 	else
@@ -5096,12 +5113,10 @@ static void fts_health_check_work(struct work_struct *work)
 		pr_err("%s: IC not responding, failure %d of %u\n", __func__,
 		       info->health_fail_cnt, health_check_fail_max);
 		if (info->health_fail_cnt >= (int)health_check_fail_max) {
-			pr_err("%s: IC unresponsive, forcing recovery\n", __func__);
+			pr_err("%s: IC unresponsive, full cold restart\n", __func__);
 			release_all_touches(info);
-			fts_cold_boot_hw_reset(info); /* crux: deep残留需真冷启动，powercycle清不掉 */
-			fts_system_reset();
-			fts_mode_handler(info, 0);
-			fts_enableInterrupt(true);
+			/* [crux 2026-11-07] 与原厂一致：完整 cold restart */
+			fts_sense_retry_cold(info);
 			info->health_fail_cnt = 0;
 		}
 	} else {
@@ -5191,6 +5206,91 @@ static void fts_aggregate_bus_state(struct fts_ts_info *info)
 	else
 		queue_work(info->event_wq, &info->resume_work);
 }
+
+/*
+ * [crux 2026-11-07] 屏幕状态挂钩（替代原厂依赖的 msm_drm_notifier）。
+ * 由面板驱动 panel-samsung-ea8076-f1s 在 enable/unprepare 调用。
+ */
+static int fts_set_baseline_adaptation(struct fts_ts_info *info, bool enable)
+{
+	u8 val = enable ? 0x01 : 0x00;
+	int res;
+
+	if (fts_set_bus_ref(info, FTS_BUS_REF_SYSFS, true) < 0)
+		return ERROR_BUS_WR;
+	res = writeConfig(ADDR_CONFIG_AUTOCAL, &val, 1);
+	fts_set_bus_ref(info, FTS_BUS_REF_SYSFS, false);
+	return res;
+}
+
+static void fts_baseline_work(struct work_struct *work)
+{
+	struct fts_ts_info *info = container_of(work, struct fts_ts_info,
+						baseline_work);
+	int res = fts_set_baseline_adaptation(info, false);
+
+	/* 亮屏只做轻量动作，强制校准留给"水膜模式卡住"的检测 */
+	pr_info("[FTS] screen-on: baseline adaptation disabled (%d)\n", res);
+}
+
+static void fts_water_recover_work(struct work_struct *work)
+{
+	struct fts_ts_info *info = container_of(work, struct fts_ts_info,
+						water_recover_work.work);
+	u8 cal[2] = { CAL_MS_TOUCH | CAL_SS_TOUCH, 0x00 };
+	int res;
+
+	if (!info->water_mode)
+		return;
+
+	if (info->water_recover_tries >= 3) {
+		pr_err("[FTS] water mode stuck %u times, full cold restart\n",
+		       info->water_recover_tries);
+		info->water_recover_tries = 0;
+		fts_sense_retry_cold(info);
+		return;
+	}
+
+	info->water_recover_tries++;
+	pr_warn("[FTS] water mode stuck, force cal attempt %u\n",
+		info->water_recover_tries);
+
+	if (fts_set_bus_ref(info, FTS_BUS_REF_SYSFS, true) < 0)
+		return;
+	fts_enableInterrupt(false);
+	res = writeSysCmd(SYS_CMD_FORCE_CAL, cal, 2);
+	fts_enableInterrupt(true);
+	fts_set_baseline_adaptation(info, false);
+	fts_set_bus_ref(info, FTS_BUS_REF_SYSFS, false);
+
+	pr_info("[FTS] force cal done (%d)\n", res);
+	schedule_delayed_work(&info->water_recover_work, msecs_to_jiffies(5000));
+}void fts_screen_state_changed(bool on)
+{
+	struct device *dev = getDev();
+	struct fts_ts_info *info;
+
+	if (!dev)
+		return;
+	info = dev_get_drvdata(dev);
+	if (!info)
+		return;
+
+	pr_info("[FTS] display %s\n", on ? "ON" : "OFF");
+	fts_set_bus_ref(info, FTS_BUS_REF_SCREEN_ON, on);
+
+	if (on) {
+		/* [crux 2026-11-07] 必须先 resume：suspend_work 只把 IC 送进低功耗，
+		 * 不复位；不跑 resume_work 的话 IC 会一直睡着（IRQ 不再来）。
+		 * 顺序：resume（system reset + sense on + 使能中断）→ 再关基线自适应。
+		 */
+		queue_work(info->event_wq, &info->resume_work);
+		queue_work(info->event_wq, &info->baseline_work);
+	} else {
+		queue_work(info->event_wq, &info->suspend_work);
+	}
+}
+EXPORT_SYMBOL_GPL(fts_screen_state_changed);
 
 int fts_set_bus_ref(struct fts_ts_info *info, u16 ref, bool enable)
 {
@@ -5776,6 +5876,8 @@ static int fts_probe(struct spi_device *client)
 	}
 
 	INIT_WORK(&info->resume_work, fts_resume_work);
+	INIT_WORK(&info->baseline_work, fts_baseline_work);	/* [crux] */
+	INIT_DELAYED_WORK(&info->water_recover_work, fts_water_recover_work);	/* [crux] */
 	INIT_WORK(&info->suspend_work, fts_suspend_work);
 	INIT_DELAYED_WORK(&info->health_work, fts_health_check_work);
 

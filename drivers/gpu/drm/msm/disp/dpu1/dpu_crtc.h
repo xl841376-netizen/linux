@@ -10,6 +10,7 @@
 #define _DPU_CRTC_H_
 
 #include <linux/kthread.h>
+#include <linux/atomic.h>
 #include <drm/drm_crtc.h>
 #include "dpu_kms.h"
 #include "dpu_core_perf.h"
@@ -162,6 +163,8 @@ struct dpu_crtc {
 
 	u32 vblank_cb_count;
 	u64 play_count;
+	/* crux: 屏幕设备帧率统计（frame-done 计数） */
+	atomic64_t fps_frames;
 	ktime_t vblank_cb_time;
 	bool enabled;
 

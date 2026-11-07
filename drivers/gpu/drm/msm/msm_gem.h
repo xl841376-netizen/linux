@@ -193,6 +193,8 @@ msm_gem_vma_new(struct drm_gpuvm *vm, struct drm_gem_object *obj,
 		u64 offset, u64 range_start, u64 range_end);
 void msm_gem_vma_unmap(struct drm_gpuva *vma, const char *reason);
 void msm_gem_vma_trace_dump(unsigned long fault_iova);
+int msm_gem_vma_trace_classify(u64 iova, u64 *start, u64 *end,
+			       u32 *pid, char comm[16]);
 int msm_gem_vma_map(struct drm_gpuva *vma, int prot, struct sg_table *sgt);
 void msm_gem_vma_close(struct drm_gpuva *vma);
 

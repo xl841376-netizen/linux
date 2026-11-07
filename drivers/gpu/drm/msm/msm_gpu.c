@@ -461,6 +461,29 @@ static void get_comm_cmdline(struct msm_gem_submit *submit, char **comm, char **
 	put_task_struct(task);
 }
 
+/*
+ * [crux 2026-11-06] 显示寄存器可用性闸门。
+ *
+ * hangcheck recover 期间，以及"复位之后还没成功提交过一帧"的那段时间里，
+ * DPU 的 INTF/DSI 寄存器块是下电的；此时任何 ioread32 都会触发
+ * synchronous external abort（现场：cat /sys/kernel/debug/crux_te_sync/rate）。
+ * 这里维护一个全局状态，供只读观测器（crux-te-sync）在碰寄存器前先问一声。
+ */
+static atomic_t msm_display_hw_bad = ATOMIC_INIT(0);
+
+bool msm_display_hw_unavailable(void)
+{
+	return atomic_read(&msm_display_hw_bad) != 0;
+}
+EXPORT_SYMBOL_GPL(msm_display_hw_unavailable);
+
+/* 由显示提交路径调用：真的有一帧被编程进硬件了，说明 INTF 又活了 */
+void msm_display_hw_commit_done(void)
+{
+	atomic_set(&msm_display_hw_bad, 0);
+}
+EXPORT_SYMBOL_GPL(msm_display_hw_commit_done);
+
 static void recover_worker(struct kthread_work *work)
 {
 	struct msm_gpu *gpu = container_of(work, struct msm_gpu, recover_work);
@@ -474,6 +497,9 @@ static void recover_worker(struct kthread_work *work)
 	int i;
 
 	mutex_lock(&gpu->lock);
+
+	/* 复位窗口：此后到下一次成功提交之前，禁止任何寄存器观测 */
+	atomic_set(&msm_display_hw_bad, 1);
 
 	DRM_DEV_ERROR(dev->dev, "%s: hangcheck recover!\n", gpu->name);
 

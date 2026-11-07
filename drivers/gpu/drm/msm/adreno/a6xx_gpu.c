@@ -1818,6 +1818,42 @@ static void a6xx_cp_hw_err_irq(struct msm_gpu *gpu)
 
 }
 
+/*
+ * [crux 2026-11-06] 商业版 KGSL 的默认页错误策略是"只记录、不 halt"
+ * （adreno.h: KGSL_FT_PAGEFAULT_DEFAULT_POLICY = 0），恢复交给提交层的
+ * fault-tolerance 重放，并且带节流（同一 context 3 秒内挂 3 次才作废）。
+ *
+ * 主线这里相反：每检测到一次 fault 就立刻删 hangcheck、屏蔽中断、排队做全 GPU
+ * 复位 —— 表现就是每次 fault 都"卡一下"、KWin 的 effects 重启。
+ *
+ * 这里照抄商业版的行为，但保留一个安全阀：1 秒窗口内 fault 超过 4 次，
+ * 说明不是偶发（真的锁死了），仍然走老的硬复位路径。
+ * 可用 fault_defer_reset=0 关掉（回到主线行为）。
+ */
+static bool crux_fault_defer = true;
+module_param_named(fault_defer_reset, crux_fault_defer, bool, 0644);
+MODULE_PARM_DESC(fault_defer_reset,
+	"记录 GPU fault 但先不复位，交给 hangcheck 判定（默认 1）");
+
+#define CRUX_FAULT_BURST_MAX 4
+
+static unsigned long crux_fault_window;
+static unsigned int crux_fault_count;
+
+/* 返回 true 表示这一轮可以"只记不reset"，false 表示该硬复位了 */
+static bool crux_fault_deferrable(void)
+{
+	unsigned long now = jiffies;
+
+	if (time_after(now, crux_fault_window + HZ)) {
+		crux_fault_window = now;
+		crux_fault_count = 0;
+	}
+
+	crux_fault_count++;
+	return crux_fault_count <= CRUX_FAULT_BURST_MAX;
+}
+
 static void a6xx_fault_detect_irq(struct msm_gpu *gpu)
 {
 	struct msm_ringbuffer *ring = gpu->funcs->active_ring(gpu);
@@ -1841,6 +1877,17 @@ static void a6xx_fault_detect_irq(struct msm_gpu *gpu)
 		gpu_read(gpu, REG_A6XX_CP_IB1_REM_SIZE),
 		gpu_read64(gpu, REG_A6XX_CP_IB2_BASE),
 		gpu_read(gpu, REG_A6XX_CP_IB2_REM_SIZE));
+
+	if (crux_fault_defer && crux_fault_deferrable()) {
+		/*
+		 * 只记录：不删 hangcheck、不屏蔽中断、不排队复位。
+		 * hangcheck 定时器还在跑，如果 ring 真的不前进，一个周期后
+		 * 它自己会 queue recover_work（msm_gpu.c:hangcheck_handler）。
+		 */
+		dev_info_ratelimited(&gpu->pdev->dev,
+			"gpu fault: 按商业版策略只记录，交给 hangcheck 判定\n");
+		return;
+	}
 
 	/* Turn off the hangcheck timer to keep it from bothering us */
 	timer_delete(&gpu->hangcheck_timer);

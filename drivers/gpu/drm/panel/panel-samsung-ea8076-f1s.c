@@ -24,6 +24,13 @@ void crux_rec_dump(void); /* [crux] 录制转储 */
 #include <drm/drm_panel.h>
 #include <drm/drm_probe_helper.h>
 
+
+/*
+ * [crux 2026-11-07] 把面板的亮/灭状态告诉触控驱动（mainline 没有 msm_drm_notifier）。
+ * 触控 IC 在息屏期间会停在"扫描但不上报"，亮屏时必须显式重新拉起上报。
+ */
+extern void fts_screen_state_changed(bool on);
+
 struct samsung_ea8076_f1s {
 	struct drm_panel panel;
 	struct mipi_dsi_device *dsi;
@@ -93,6 +100,7 @@ static int samsung_ea8076_f1s_power_on(struct samsung_ea8076_f1s *ctx)
 	}
 
 	usleep_range(10000, 11000);
+
 	ctx->powered = true;
 
 	return 0;
@@ -153,14 +161,12 @@ static int samsung_ea8076_f1s_on(struct samsung_ea8076_f1s *ctx)
 	mipi_dsi_usleep_range(&dsi_ctx, 10000, 11000);
 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xf0, 0x5a, 0x5a);
 	/*
-	 * [crux] TE 输出模式按原厂来。
-	 * 原厂 f1s 节点：qcom,mdss-dsi-te-dcs-command = 1；
-	 * 我们这里原来写的是 VBLANK(=0)，发出去的是 0x35 00。
-	 * 这两个模式下 TE 脉冲出现的位置不同，DPU 的 tear check 是按 TE
-	 * 对齐送帧的，模式不对就会在面板刷新中途把帧写进去（画面随机一部分
-	 * 是新帧、一部分还是旧帧，看起来就是花屏）。
+	 * [crux 2026-11-07] 对齐原厂 on-command 序列：
+	 *   39 00 00 00 00 00 02 35 00
+	 * 原厂发的是 0x35 00（VBLANK），我们之前发的是 0x35 01（VHBLANK）。
+	 * 实测 gpio8 上量不到 TE，先按原厂改回 VBLANK 再测。
 	 */
-	mipi_dsi_dcs_set_tear_on_multi(&dsi_ctx, MIPI_DSI_DCS_TEAR_MODE_VHBLANK);
+	mipi_dsi_dcs_set_tear_on_multi(&dsi_ctx, MIPI_DSI_DCS_TEAR_MODE_VBLANK);
 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xb7, 0x01, 0x4b);
 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xb0, 0x06);
 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xb7, 0x10);
@@ -280,6 +286,9 @@ static int samsung_ea8076_f1s_enable(struct drm_panel *panel)
 	/* [crux] 初始化已经做完，把录制连同 DCS 包打出来给交接用 */
 	crux_rec_dump();
 
+	/* [crux 2026-11-07] 亮屏：重新拉起触控上报 */
+	fts_screen_state_changed(true);
+
 	return 0;
 }
 
@@ -296,6 +305,9 @@ static int samsung_ea8076_f1s_unprepare(struct drm_panel *panel)
 	gpiod_set_value_cansleep(ctx->reset_gpio, 1);
 
 	samsung_ea8076_f1s_power_off(ctx);
+
+	/* [crux 2026-11-07] 息屏：通知触控驱动 */
+	fts_screen_state_changed(false);
 
 	return 0;
 }

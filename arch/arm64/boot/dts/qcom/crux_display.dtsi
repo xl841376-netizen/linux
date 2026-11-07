@@ -175,5 +175,20 @@
 	crux_te_sync: crux-te-sync {
 		compatible = "crux,te-sync";
 		status = "okay";
+		/*
+		 * [crux 2026-11-07] 窗口改成 DT 描述，不再硬编码：
+		 * 缺窗口时 probe 直接失败，而不是静默读到别的实例/tile。
+		 * TLMM 四个 tile 都给出，gpio8 在 north。
+		 */
+		reg = <0x0 0x0ae6b800 0x0 0x1000>,	/* DPU INTF_1 */
+		      <0x0 0x0ae94000 0x0 0x1000>,	/* DSI0 ctrl */
+		      <0x0 0x03100000 0x0 0x10000>,	/* TLMM west  */
+		      <0x0 0x03500000 0x0 0x10000>,	/* TLMM east  */
+		      <0x0 0x03900000 0x0 0x10000>,	/* TLMM north（gpio8/TE）*/
+		      <0x0 0x03d00000 0x0 0x10000>,	/* TLMM south */
+		      <0x0 0x09c00000 0x0 0x2400000>;	/* 引导器帧缓冲 */
+		reg-names = "intf1", "dsi0",
+			    "tlmm-west", "tlmm-east", "tlmm-north", "tlmm-south",
+			    "gop";
 	};
 };

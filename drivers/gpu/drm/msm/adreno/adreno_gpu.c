@@ -280,6 +280,25 @@ void adreno_check_and_reenable_stall(struct adreno_gpu *adreno_gpu)
 #define ARM_SMMU_FSR_EF			BIT(4)
 #define ARM_SMMU_FSR_SS			BIT(30)
 
+
+/*
+ * [crux 2026-11-07] 故障抑制（照商业版 KGSL 的两条策略）
+ *   - overfetch（读 fault 落在刚释放区间末尾 64B 内）默认抑制：不打印、不 dump
+ *   - UAF（读 fault 落在刚释放区间内部）默认只打印一行"premature free"，可开启完全抑制
+ */
+static bool crux_suppress_overfetch = true;
+module_param_named(suppress_overfetch_faults, crux_suppress_overfetch, bool, 0644);
+MODULE_PARM_DESC(suppress_overfetch_faults,
+	"抑制落在已释放区间末尾 64B 内的读 fault（UCHE overfetch，默认 1）");
+
+static bool crux_suppress_uaf_read;
+module_param_named(suppress_uaf_read_faults, crux_suppress_uaf_read, bool, 0644);
+MODULE_PARM_DESC(suppress_uaf_read_faults,
+	"抑制落在已释放区间内部的读 fault（真 UAF，默认 0：只记录不抑制）");
+
+static atomic_t crux_suppressed_faults = ATOMIC_INIT(0);
+static atomic_t crux_premature_frees = ATOMIC_INIT(0);
+
 int adreno_fault_handler(struct msm_gpu *gpu, unsigned long iova, int flags,
 			 struct adreno_smmu_fault_info *info, const char *block,
 			 u32 scratch[4])
@@ -324,6 +343,32 @@ int adreno_fault_handler(struct msm_gpu *gpu, unsigned long iova, int flags,
 		type = "PERMISSION";
 	else if (info->fsr & ARM_SMMU_FSR_EF)
 		type = "EXTERNAL";
+
+	{
+		u64 fs = 0, fe = 0;
+		u32 fpid = 0;
+		char fcomm[16] = { 0 };
+		int cls = msm_gem_vma_trace_classify(iova, &fs, &fe, &fpid, fcomm);
+
+		if (!(flags & IOMMU_FAULT_WRITE) && cls == 2 && crux_suppress_overfetch) {
+			/* UCHE overfetch：商业版直接吞掉，这里只计数 */
+			if ((atomic_inc_return(&crux_suppressed_faults) & 0x3f) == 1)
+				pr_info("gpu fault: 已抑制 %d 次 overfetch（最近一次 iova=0x%lx，末尾 0x%llx，释放者 %s/%u）\n",
+					atomic_read(&crux_suppressed_faults), iova,
+					fe, fcomm, fpid);
+			return 0;
+		}
+
+		if (cls == 1 || cls == 2) {
+			atomic_inc(&crux_premature_frees);
+			pr_warn_ratelimited("---- premature free ---- [%llx-%llx] 释放者 pid=%u comm=%s%s\n",
+				fs, fe, fpid, fcomm,
+				cls == 1 ? "（真 UAF：GPU 读已释放区间内部）"
+					 : "（overfetch，未抑制）");
+			if (cls == 1 && crux_suppress_uaf_read)
+				return 0;
+		}
+	}
 
 	pr_warn_ratelimited("*** gpu fault: ttbr0=%.16llx iova=%.16lx dir=%s type=%s source=%s (%u,%u,%u,%u)\n",
 			info->ttbr0, iova,
