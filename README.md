@@ -1,7 +1,7 @@
 # Xiaomi Mi 9 Pro 5G（crux）· 主线 Linux 适配状态
 
 > 本页**只记录当前设备上实际可用**的部分，逐项都有实机证据。
-> 采集时间：**2026-10-20 09:30**（设备连续运行中）
+> 采集时间：**2026-11-07 22:50**（设备运行中，内核 #111）
 > 仓库定位：本仓库为 `torvalds/linux` 的 fork；移植代码在分支 `crux-sm8150-73`。
 > 相关仓库：[`crux-grub`](https://github.com/xl841376-netizen/crux-grub)（GRUB 引导层：aarch64-efi standalone + cruxdisplay 显示交接模块）｜UEFI 侧 fork [`Mu-Silicium` 分支 `crux-port-next`](https://github.com/xl841376-netizen/Mu-Silicium/tree/crux-port-next)（Mu/Silicium 固件，基于云端最新 main + 仅本机改动）｜[`crux-minimal-rootfs`](https://github.com/xl841376-netizen/crux-minimal-rootfs)（最小 rootfs）。
 
@@ -12,10 +12,10 @@
 | 项 | 实测值 |
 |---|---|
 | 机型 | `Xiaomi Mi 9 Pro 5G (crux)`（/proc/device-tree/model） |
-| 内核 | `7.3.0-rc5-crux73`（本地版本串；对应分支 `crux-sm8150-73` @ `6178fbc`） |
-| 根文件系统 | Ubuntu（aarch64，KDE/GNOME 桌面），`/dev/sda37`（`linux-root26`，23.5G，已用 18.3G / 余 3.9G） |
-| 引导 | UEFI + ESP（`/dev/sda35`，510.8M，已用 114.9M）+ **GRUB**：`EFI/BOOT/BOOTAA64.efi`，菜单 `EFI/crux/grub.cfg`。默认条目先跑 `cruxdisplay.mod` 的 `crux_display_init` 完成显示交接，再 `linux/initrd/devicetree` 交给内核：`Image74` + `sm8150-xiaomi-crux-73.dtb` + `initramfs.cpio.gz`；另有 6.17 回退条目（`Image` + `sm8150-xiaomi-crux.dtb`）与 Windows(WoA) 链式引导条目 |
-| 稳定性 | 本次开机持续运行、无重启；四颗 DSP + WiFi + 音频常驻 |
+| 内核 | `7.3.0-rc5-crux73 #111`（对应分支 `crux-sm8150-73` @ `127202f140a2`，2026-11-07 22:25 构建） |
+| 根文件系统 | Ubuntu（aarch64，KDE Plasma 6.6 / Wayland），`/dev/sda36`（`linux-root`，64G，已用 18G / 余 45G） |
+| 引导 | UEFI + ESP（`/dev/sda35`，510.8M，已用 189M）+ **GRUB**：`EFI/BOOT/BOOTAA64.efi`，菜单 `EFI/crux/grub.cfg`。默认条目先跑 `cruxdisplay.mod` 的 `crux_display_init` 完成显示交接，再 `linux/initrd/devicetree` 交给内核：`Image87` + `sm8150-xiaomi-crux-73.dtb` + `initramfs.cpio.gz`；另有 DEBUG initcall 条目与 Windows(WoA) 链式引导条目 |
+| 稳定性 | 本次开机无重启；四颗 DSP + WiFi + 音频常驻。GPU 仍有 CCU translation fault（约 1~2 次/分），偶发 hangcheck recover（恢复时画面短暂停更） |
 
 ---
 
@@ -24,10 +24,10 @@
 | 子系统 | 实测状态 | 证据 |
 |---|---|---|
 | **显示** | 可用 | DRM `card0`，`card0-DSI-1 = connected`；`ae01000.display-controller` 已注册；桌面正常出图 |
-| **GPU** | 可用 | `2c00000.gpu` devfreq、`renderD128` 存在（每约 60 秒一条 `gpu fault … source=CCU type=TRANSLATION`，不影响出图） |
-| **触摸** | 可用 | `fts` 触摸（i2c-0 @0x49）；固件 `ftm5_fw.ftb` |
+| **GPU** | 可用（有残留 fault） | `2c00000.gpu` devfreq、`renderD128` 存在；CCU translation fault 约 1~2 次/分，约 10 分钟一次 hangcheck recover，恢复时画面短暂停更 |
+| **触摸** | 可用 | `fts` 触摸（i2c-1 @0x49）；固件 `ftm5_fw.ftb` |
 | **物理按键** | 可用 | `pm8941_pwrkey`、`pm8941_resin`、`gpio-keys` |
-| **存储（UFS）** | 可用 | `1d84000.ufshc`；`/dev/sda` 全部 37 个分区可读；`sda35`=efi、`sda36`=linux-root(64G)、`sda37`=linux-root26(24G，当前根) |
+| **存储（UFS）** | 可用 | `1d84000.ufshc`；`/dev/sda` 37 个分区可读；`sda35`=efi、`sda36`=linux-root(64G，当前根)、`sda38`=linux-swap(8G) |
 | **读取 Android 分区** | 可用 | `sda32`=vendor 挂 `/vendor`、`sda33`=system 挂 `/mnt/sys`（只读参考，不回写） |
 | **WiFi** | 可用 | `ath10k_snoc`（WCN3990，节点 `18800000.wifi`）；`wlan0 = 192.168.1.240/24`（NM 连接 `cmcc24`，**静态地址**），有外网。固件偶发自复位产生日志噪声（见 §4），不影响使用 |
 | **远程访问** | 可用 | WiFi 直连 `192.168.1.240`；USB ECM 备用 `192.168.2.2`（UDC `a600000.usb`） |
@@ -90,13 +90,12 @@ model = "Xiaomi Mi9 Pro5G sm8150" -> 卡 id = "sm8150" // ACP 按驱动名命中
 | 项 | 状态 |
 |---|---|
 | 参与基带的内置部分 | **只有四个子系统** `mpss` / `adsp` / `cdsp` / `slpi`，由 `qcom-subsys-start` 拉起（`modem` 是 `auto_boot=false`，靠 `echo start` 拉起） |
-| 外挂 X50（SIM 侧） | **整套保留但不启用**：70 个文件就按原路径待在系统路径里（本机专用，不做镜像目录），但**一个单元都没 enable**、`build.sh` 的 UNITS 里也不列，所以开机不启动 |
-| 开关 | `/etc/crux-sim.conf` 的 `SIM_X50_ENABLE`，**默认 0** |
-| 打开 / 关闭 / 查看 | `crux-sim-x50 enable` / `disable` / `status` |
+| 外挂 X50（SIM 侧） | **整套保留但不启用**：脚本（22 个 `x50-*`，本机专用、按原路径存放）仍在，供 `crux-ctl` 引擎的 `x50up` 路径按需调用；**systemd 单元已于 2026-11-07 全部删除**（12 个 `x50-*` + `crux-x50-early` + `crux-x50-poweroff`），所以开机不参与 |
+| 开关 | 真正的开关是 `/etc/crux-modem.conf` 的 `X50_ENABLE`（**默认 0**）；`/etc/crux-sim.conf` 的 `SIM_X50_ENABLE` 已标为 legacy |
 | 依赖关系 | `qcom-subsys-start.service` 里**已删掉** `Wants=x50-rfs-persist.service` 与 `After=x50-rfs-persist.service`，四子系统启动不再依赖 X50 任何东西 |
 
-本机设备实况（2026-10-20）：`x50-*` 单元 13 个 disabled + 2 个 still enabled（`x50-rfs-persist`、`crux-x50-poweroff`），
-SIM 侧实际未参与通信；四个 rproc 全部 `running`，内置 modem 由 `modem-mnt` + `qcom-subsys-start` 照常拉起。
+本机设备实况（2026-11-07）：14 个 X50 单元已全部删除（备份 `/root/archives/x50-units-20261107.tar.gz`），无 x50 进程；
+SIM 侧不参与通信；四个 rproc 全部 `running`，内置 modem 由 `modem-mnt` + `qcom-subsys-start` 照常拉起。
 
 ---
 
@@ -161,6 +160,5 @@ ssh root@192.168.2.2          # USB ECM 备用
 
 | 项 | 状态 | 说明 |
 |---|---|---|
-| **外挂 X50 基带 / SIM** | 未完成，且**默认不启用** | 内核侧 MHI / IPA 通道（`mhi_sahara`、`ipa_mhi_proxy`、`ipa_data-v4.1`）已进 `crux-sm8150-73`；用户态 70 个文件（15 个 `x50-*` 单元、13 个 drop-in、约 30 个程序、3 条 udev、2 个 modprobe 参数）在 `crux-minimal-rootfs` 里**按原路径就位**（本机专用，不做镜像目录），但默认一个都不 enable，开关是 `/etc/crux-sim.conf` 的 `SIM_X50_ENABLE=0`（`crux-sim-x50 enable/disable/status`）。原因：QMI 侧仍卡在 SIM provisioning session（`0x38`）与注册后拖死阶段，未曾跑通 |
-| **摄像头** | 未支持 | 无可用通路 |
-| **sda36（64G `linux-root`）** | 在用但**可选**，仓库侧默认不再依赖 | 设备上它挂在 `/mnt/lroot`，扛着 8G swapfile（另有 zram 4G，合计 12G 交换）。仓库 `crux-minimal-rootfs` 已把它改成**开关控制**：`/etc/crux-swap.conf` 的 `LROOT_SWAP=1` 才启用这 8G swapfile 与 `/mnt/lroot` 挂载，**默认 0 = 只建 zram 4G**。原因：这块盘随时可能被删除并入 sda37，不该让开机默认路径绑在它上面。本机当前仍是开着的（等价于 `LROOT_SWAP=1`）。 |
+| **外挂 X50 基带 / SIM** | 未完成，且**默认不启用** | 控制面已统一走 **`crux-ctl` 引擎**（`/usr/local/lib/crux-ctl/`，QMI over QRTR；`crux-ctl rawqmi` 发原始 QMI，`x50:` 前缀选 node3）。14 个 X50 systemd 单元已于 2026-11-07 全部删除（备份 `/root/archives/x50-units-20261107.tar.gz`），脚本保留给引擎 `x50up` 按需调用。X50 本身仍**从未枚举成功**（`17cb:0305` 未出现），开关 `/etc/crux-modem.conf` 的 `X50_ENABLE=0`。内置 X24 的 SIM 链路 READY/registered 已于 2026-11-02 验证；当前两个物理槽均无卡（槽1 硬件损坏、槽2 空） |
+| **摄像头** | 未支持 | 无可用通路：设备树里没有 camera/cci 节点，内核未使能 camss，dmesg 无相关探测 |
