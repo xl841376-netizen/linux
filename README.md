@@ -12,7 +12,7 @@
 | 项 | 实测值 |
 |---|---|
 | 机型 | `Xiaomi Mi 9 Pro 5G (crux)`（/proc/device-tree/model） |
-| 内核 | `7.3.0-rc5-crux73 #113`（对应分支 `crux-sm8150-73` @ `db92dd698221` + 本地未提交 modem 改动，2026-11-07 23:19 构建） |
+| 内核 | `7.3.0-rc5-crux73 #114`（对应分支 `crux-sm8150-73` @ `503ef563f9d9` + 本地未提交 modem 改动，2026-11-07 23:31 构建） |
 | 根文件系统 | Ubuntu（aarch64，KDE Plasma 6.6 / Wayland），`/dev/sda36`（`linux-root`，64G，已用 18G / 余 45G） |
 | 引导 | UEFI + ESP（`/dev/sda35`，510.8M，已用 189M）+ **GRUB**：`EFI/BOOT/BOOTAA64.efi`，菜单 `EFI/crux/grub.cfg`。默认条目先跑 `cruxdisplay.mod` 的 `crux_display_init` 完成显示交接，再 `linux/initrd/devicetree` 交给内核：`Image87` + `sm8150-xiaomi-crux-73.dtb` + `initramfs.cpio.gz`；另有 DEBUG initcall 条目与 Windows(WoA) 链式引导条目 |
 | 稳定性 | 本次开机无重启；四颗 DSP + WiFi + 音频常驻。GPU 仍有 CCU translation fault（约 1~2 次/分），偶发 hangcheck recover（恢复时画面短暂停更） |
