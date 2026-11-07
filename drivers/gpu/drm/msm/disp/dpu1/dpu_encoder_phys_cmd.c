@@ -6,6 +6,7 @@
 #define pr_fmt(fmt)	"[drm:%s:%d] " fmt, __func__, __LINE__
 #include <linux/delay.h>
 #include <linux/string_choices.h>
+#include <linux/ktime.h>
 #include "dpu_encoder_phys.h"
 #include "dpu_hw_interrupts.h"
 #include "dpu_hw_pingpong.h"
@@ -32,6 +33,15 @@
 #define PP_TIMEOUT_MAX_TRIALS	10
 
 /*
+ * [crux 2026-11-07] TE 丢失降级兜底：
+ * kickoff 超时（84ms，远早于 DRM hangcheck 的 1s）说明帧没等到面板 TE。
+ * 先降级成内部 vsync（vtotal*2）保证画面继续；之后每 30s 试一次外部 TE，
+ * 连续 3 次失败就粘在兜底模式，直到下一次 enable（亮屏/模式设置/reset）。
+ */
+#define TE_FALLBACK_RETRY_MS	30000
+#define TE_FALLBACK_MAX_FAILS	3
+
+/*
  * Tearcheck sync start and continue thresholds are empirically found
  * based on common panels In the future, may want to allow panels to override
  * these default values
@@ -41,6 +51,8 @@
 
 
 static void dpu_encoder_phys_cmd_enable_te(struct dpu_encoder_phys *phys_enc);
+static void dpu_encoder_phys_cmd_tearcheck_config(
+		struct dpu_encoder_phys *phys_enc);
 
 static bool dpu_encoder_phys_cmd_is_master(struct dpu_encoder_phys *phys_enc)
 {
@@ -88,12 +100,24 @@ static void _dpu_encoder_phys_cmd_update_intf_cfg(
 static void dpu_encoder_phys_cmd_pp_tx_done_irq(void *arg)
 {
 	struct dpu_encoder_phys *phys_enc = arg;
+	struct dpu_encoder_phys_cmd *cmd_enc = to_dpu_encoder_phys_cmd(phys_enc);
 	unsigned long lock_flags;
 	int new_cnt;
 	u32 event = DPU_ENCODER_FRAME_EVENT_DONE;
 
 	if (!phys_enc->hw_pp)
 		return;
+
+	/*
+	 * [crux 2026-11-07] 兜底期间试切回外部 TE 后，这一帧能正常 done 说明
+	 * TE 回来了：清掉连续失败计数，恢复默认策略。
+	 */
+	if (cmd_enc->te_trial) {
+		cmd_enc->te_trial = false;
+		cmd_enc->te_trial_fails = 0;
+		DRM_INFO("id:%d pp:%d 外部 TE 已恢复\n",
+			 DRMID(phys_enc->parent), phys_enc->hw_pp->idx - PINGPONG_0);
+	}
 
 	DPU_ATRACE_BEGIN("pp_done_irq");
 	/* notify all synchronous clients first, then asynchronous clients */
@@ -152,6 +176,8 @@ static void dpu_encoder_phys_cmd_atomic_mode_set(
 		struct drm_crtc_state *crtc_state,
 		struct drm_connector_state *conn_state)
 {
+	struct dpu_encoder_phys_cmd *cmd_enc = to_dpu_encoder_phys_cmd(phys_enc);
+
 	phys_enc->irq[INTR_IDX_CTL_START] = phys_enc->hw_ctl->caps->intr_start;
 
 	phys_enc->irq[INTR_IDX_PINGPONG] = phys_enc->hw_pp->caps->intr_done;
@@ -162,6 +188,14 @@ static void dpu_encoder_phys_cmd_atomic_mode_set(
 		phys_enc->irq[INTR_IDX_RDPTR] = phys_enc->hw_pp->caps->intr_rdptr;
 
 	phys_enc->irq[INTR_IDX_UNDERRUN] = phys_enc->hw_intf->cap->intr_underrun;
+
+	/*
+	 * [crux 2026-11-07] 新的模式设置（含亮屏/resume）给外部 TE 一次全新机会，
+	 * 清掉上一轮积累的兜底状态。
+	 */
+	cmd_enc->te_fallback = false;
+	cmd_enc->te_trial = false;
+	cmd_enc->te_trial_fails = 0;
 }
 
 static int _dpu_encoder_phys_cmd_handle_ppdone_timeout(
@@ -191,6 +225,29 @@ static int _dpu_encoder_phys_cmd_handle_ppdone_timeout(
 		     cmd_enc->pp_timeout_report_cnt,
 		     atomic_read(&phys_enc->pending_kickoff_cnt),
 		     frame_event);
+
+	/*
+	 * [crux 2026-11-07] 降级兜底：kickoff 超时最常见的成因是面板 TE 丢了
+	 *（严格外部 TE 模式下死等）。第一次超时就切内部 vsync，别让它一直卡到
+	 * DRM hangcheck（1s）去整屏 recover。
+	 */
+	if (!cmd_enc->te_fallback) {
+		if (cmd_enc->te_trial) {
+			cmd_enc->te_trial = false;
+			cmd_enc->te_trial_fails++;
+		}
+		cmd_enc->te_fallback = true;
+		cmd_enc->te_retry_at = ktime_add_ms(ktime_get(), TE_FALLBACK_RETRY_MS);
+		DRM_ERROR("id:%d pp:%d TE 缺失（kickoff 超时），降级为内部 vsync 兜底，连续失败 %u 次\n",
+			  DRMID(drm_enc), phys_enc->hw_pp->idx - PINGPONG_0,
+			  cmd_enc->te_trial_fails);
+		/*
+		 * 立刻改写 tear check：卡住的那一帧还挂在 INTF 上等 TE，
+		 * 不重编程的话下一次 commit 的 wait_for_idle 还会超时，永远走不到
+		 * 重新 enable 的路径。
+		 */
+		dpu_encoder_phys_cmd_tearcheck_config(phys_enc);
+	}
 
 	/* to avoid flooding, only log first time, and "dead" time */
 	if (do_log) {
@@ -389,14 +446,25 @@ static void dpu_encoder_phys_cmd_tearcheck_config(
 				(mode->vtotal * drm_mode_vrefresh(mode));
 
 	/*
-	 * [crux 2026-11-07] 对齐原厂 sde_encoder_phys_cmd_tearcheck_config()：
-	 * TE 已实测正常（gpio8/mdp_vsync，占空比 ~0.5%），所以改成"只等外部 TE"：
+	 * [crux 2026-11-07] 默认对齐原厂 sde_encoder_phys_cmd_tearcheck_config()：
+	 * TE 已实测正常（gpio8/mdp_vsync，占空比 ~0.5%），所以"只等外部 TE"：
 	 *   hw_vsync_mode = 0       —— 用外部 TE，不用内部 hw vsync
 	 *   sync_cfg_height = 0xFFF0 —— 关掉 SDE 自产的 TE，强制等面板 TE
-	 * 原主线的 vtotal*2 是"丢 TE 时用内部定时器兜底"，会让帧不等 TE 就写 GRAM。
+	 *
+	 * 保底：一旦 kickoff 超时判定 TE 丢失，te_fallback 置位，这里改回主线的
+	 *   hw_vsync_mode = 1 / sync_cfg_height = vtotal*2（内部 vsync 兜底），
+	 * 先让画面继续走，再由 post_kickoff 按 30s 退避重试外部 TE。
 	 */
-	tc_cfg.hw_vsync_mode = 0;
-	tc_cfg.sync_cfg_height = 0xFFF0;
+	if (cmd_enc->te_fallback) {
+		tc_cfg.hw_vsync_mode = 1;
+		tc_cfg.sync_cfg_height = mode->vtotal * 2;
+	} else {
+		tc_cfg.hw_vsync_mode = 0;
+		tc_cfg.sync_cfg_height = 0xFFF0;
+	}
+	DPU_DEBUG_CMDENC(cmd_enc, "tearcheck %s (vtotal %u)\n",
+			 cmd_enc->te_fallback ? "fallback: internal vsync" : "external TE",
+			 mode->vtotal);
 	tc_cfg.vsync_init_val = mode->vdisplay;
 	tc_cfg.sync_threshold_start = DEFAULT_TEARCHECK_SYNC_THRESH_START;
 	tc_cfg.sync_threshold_continue = DEFAULT_TEARCHECK_SYNC_THRESH_CONTINUE;
@@ -701,6 +769,25 @@ static int dpu_encoder_phys_cmd_wait_for_commit_done(
 static void dpu_encoder_phys_cmd_handle_post_kickoff(
 		struct dpu_encoder_phys *phys_enc)
 {
+	struct dpu_encoder_phys_cmd *cmd_enc = to_dpu_encoder_phys_cmd(phys_enc);
+
+	/*
+	 * [crux 2026-11-07] 兜底模式下按退避重试外部 TE：
+	 * 到点就把 tear check 切回"只等外部 TE"，下一帧若正常 done 就算恢复，
+	 * 若再次 kickoff 超时会由 timeout handler 计数并退回兜底。
+	 */
+	if (cmd_enc->te_fallback &&
+	    cmd_enc->te_trial_fails < TE_FALLBACK_MAX_FAILS &&
+	    ktime_after(ktime_get(), cmd_enc->te_retry_at)) {
+		cmd_enc->te_fallback = false;
+		cmd_enc->te_trial = true;
+		cmd_enc->te_retry_at = ktime_add_ms(ktime_get(), TE_FALLBACK_RETRY_MS);
+		dpu_encoder_phys_cmd_tearcheck_config(phys_enc);
+		DRM_INFO("id:%d pp:%d 重试外部 TE（已失败 %u 次）\n",
+			 DRMID(phys_enc->parent), phys_enc->hw_pp->idx - PINGPONG_0,
+			 cmd_enc->te_trial_fails);
+	}
+
 	/**
 	 * re-enable external TE, either for the first time after enabling
 	 * or if disabled for Autorefresh

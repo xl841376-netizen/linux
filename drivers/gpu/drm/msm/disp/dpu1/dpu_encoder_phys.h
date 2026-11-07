@@ -246,6 +246,15 @@ struct dpu_encoder_phys_cmd {
 	int pp_timeout_report_cnt;
 	atomic_t pending_vblank_cnt;
 	wait_queue_head_t pending_vblank_wq;
+	/*
+	 * [crux 2026-11-07] TE 丢失时的降级兜底：
+	 * te_fallback 为真时 tear check 用内部 vsync（vtotal*2），不再死等面板 TE；
+	 * 兜底期间按退避重试外部 TE，连续失败 TE_FALLBACK_MAX_FAILS 次就粘住到下次 enable。
+	 */
+	bool te_fallback;
+	bool te_trial;
+	u32 te_trial_fails;
+	ktime_t te_retry_at;
 };
 
 /**
