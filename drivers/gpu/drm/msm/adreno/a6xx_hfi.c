@@ -14,6 +14,20 @@
 
 #define HFI_MSG_ID(val) [val] = #val
 
+/*
+ * [crux 2026-11-17] GMU 无响应时的重试上限。
+ *
+ * a6xx_hfi_wait_for_msg_interrupt() 在 GMU 卡死时会等
+ * fault_coredump_done，而该 completion 的 signal 依赖 crashstate 采集，
+ * 后者又要拿 recover 持有的 gpu->lock → 互锁（桌面卡 LOGO）。
+ * 给重试轮数加上限即可让挂死路径退出，返回 -ETIMEDOUT 走失败分支。
+ * 每轮约 1 秒（gmu_poll_timeout 的 1000000us），默认 3 轮 ≈ 3 秒。
+ */
+static unsigned int crux_hfi_coredump_retries = 3;
+module_param_named(hfi_coredump_retries, crux_hfi_coredump_retries, uint, 0644);
+MODULE_PARM_DESC(hfi_coredump_retries,
+	"GMU 等 fault_coredump_done 的最大轮数（默认 3，每轮约 1 秒）");
+
 static const char * const a6xx_hfi_msg_id[] = {
 	HFI_MSG_ID(HFI_H2F_MSG_INIT),
 	HFI_MSG_ID(HFI_H2F_MSG_FW_VERSION),
@@ -113,6 +127,20 @@ static int a6xx_hfi_wait_for_msg_interrupt(struct a6xx_gmu *gmu, u32 id, u32 seq
 	int ret;
 	u32 val;
 	struct a6xx_gpu *a6xx_gpu = container_of(gmu, struct a6xx_gpu, gmu);
+	/*
+	 * [crux 2026-11-17] 死锁修复：原实现用无超时的
+	 * wait_for_completion(&fault_coredump_done) 无限重试。
+	 *
+	 * 死锁场景（两次复现，桌面卡 LOGO 在开机 ~18.9s）：
+	 *   recover_worker 持 gpu->lock → pm_runtime_put_sync
+	 *   → a6xx_gmu_pm_suspend → a6xx_gmu_stop → 本函数等 completion
+	 * 而 signal 该 completion 的 crashstate 采集在 irq/21 线程里，
+	 * 它必须先拿 gpu->lock —— 该锁正被 recover 持有 → 永久互锁。
+	 *
+	 * 修复：给重试加上限。超时后返回 -ETIMEDOUT，让上层 suspend
+	 * 走失败分支。GMU 已挂时本来就不该再等它优雅 slumber。
+	 */
+	int retries = 0;
 
 	do {
 		/* Wait for a response */
@@ -125,11 +153,25 @@ static int a6xx_hfi_wait_for_msg_interrupt(struct a6xx_gmu *gmu, u32 id, u32 seq
 		if (completion_done(&a6xx_gpu->base.fault_coredump_done))
 			break;
 
-		/* We may timeout because the GMU is temporarily wedged from
+		/*
+		 * We may timeout because the GMU is temporarily wedged from
 		 * pending faults from the GPU and we are taking a devcoredump.
 		 * Wait until the MMU is resumed and try again.
 		 */
-		wait_for_completion(&a6xx_gpu->base.fault_coredump_done);
+		if (++retries >= crux_hfi_coredump_retries) {
+			DRM_DEV_ERROR(gmu->dev,
+				"Message %s id %d: 等 fault_coredump_done 超过 %d 轮，判定 GMU 已挂（避免与 crashstate 采集互锁）\n",
+				a6xx_hfi_msg_id[id], seqnum, retries);
+			return -ETIMEDOUT;
+		}
+
+		/*
+		 * 带超时等待：即使 completion 永不到来也能回到循环顶部
+		 * 检查 retries 上限，不会永久停在不可中断等待里。
+		 */
+		if (wait_for_completion_timeout(&a6xx_gpu->base.fault_coredump_done,
+						msecs_to_jiffies(1000)))
+			break;
 	} while (true);
 
 	if (ret) {

@@ -135,6 +135,11 @@ struct qcom_icc_bcm {
 	u32 enable_mask;
 	bool dirty;
 	bool keepalive;
+	/* [crux] keepalive BCM 投票锁存：第一次发成功后记录，之后 vote 未变
+	 * 就跳过重复发送，避免对 RSC 不响应 completion 的地址反复写。 */
+	u64 last_vote_x[QCOM_ICC_NUM_BUCKETS];
+	u64 last_vote_y[QCOM_ICC_NUM_BUCKETS];
+	bool vote_valid;
 	struct bcm_db aux_data;
 	struct list_head list;
 	struct list_head ws_list;

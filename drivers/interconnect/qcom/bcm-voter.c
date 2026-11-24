@@ -165,6 +165,14 @@ static void tcs_list_gen(struct bcm_voter *voter, int bucket,
 	memset(n, 0, sizeof(int) * (MAX_VCD + 1));
 
 	list_for_each_entry(bcm, bcm_list, list) {
+		/* [crux] keepalive BCM 且投票值没变 -> 跳过，避免对 RSC 不回
+		 * completion 的地址（MC0/SH5 等）反复写导致 rpmh_write_batch
+		 * 10s 超时 -110，连锁打挂 RSC -> i2c4 时钟失效 -> hard lockup。 */
+		if (bcm->keepalive && bcm->vote_valid &&
+		    bcm->vote_x[bucket] == bcm->last_vote_x[bucket] &&
+		    bcm->vote_y[bucket] == bcm->last_vote_y[bucket])
+			continue;
+
 		commit = false;
 		cur_vcd_size++;
 		if ((list_is_last(&bcm->list, bcm_list)) ||
@@ -315,12 +323,27 @@ int qcom_icc_bcm_voter_commit(struct bcm_voter *voter)
 	ret = rpmh_write_batch(voter->dev, RPMH_ACTIVE_ONLY_STATE,
 			       cmds, commit_idx);
 	if (ret) {
+		int i;
+
 		pr_err("Error sending AMC RPMH requests (%d)\n", ret);
+		for (i = 0; i < commit_idx[0]; i++)
+			pr_err("  AMC cmd[%d] addr=0x%x data=0x%x wait=%u\n",
+			       i, cmds[i].addr, cmds[i].data, cmds[i].wait);
 		goto out;
 	}
 
-	list_for_each_entry_safe(bcm, bcm_tmp, &voter->commit_list, list)
+	list_for_each_entry_safe(bcm, bcm_tmp, &voter->commit_list, list) {
+		if (bcm->keepalive) {
+			int b2;
+
+			for (b2 = 0; b2 < QCOM_ICC_NUM_BUCKETS; b2++) {
+				bcm->last_vote_x[b2] = bcm->vote_x[b2];
+				bcm->last_vote_y[b2] = bcm->vote_y[b2];
+			}
+			bcm->vote_valid = true;
+		}
 		list_del_init(&bcm->list);
+	}
 
 	list_for_each_entry_safe(bcm, bcm_tmp, &voter->ws_list, ws_list) {
 		/*

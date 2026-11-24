@@ -155,6 +155,7 @@ int qcom_icc_bcm_init(struct qcom_icc_bcm *bcm, struct device *dev)
 		return 0;
 
 	bcm->addr = cmd_db_read_addr(bcm->name);
+	dev_info(dev, "bcm %s addr=0x%x\n", bcm->name, bcm->addr);
 	if (!bcm->addr) {
 		dev_err(dev, "%s could not find RPMh address\n",
 			bcm->name);

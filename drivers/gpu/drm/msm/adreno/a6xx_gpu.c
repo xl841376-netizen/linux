@@ -1591,6 +1591,26 @@ static void a6xx_recover(struct msm_gpu *gpu)
 
 	a6xx_gpu->hung = true;
 
+	/*
+	 * [crux 2026-11-17] 死锁修复（回归原厂做法）：同步设置 gmu->hung。
+	 *
+	 * mainline 有两个独立的 hung 标志：
+	 *   - a6xx_gpu->hung：本函数（recover）设 true，仅用于本层
+	 *   - gmu->hung：a6xx_gmu_fault（GMU 自己的中断）才设 true
+	 *
+	 * GPU 的 CCU/UCHE fault 走 a6xx_fault_handler，不经过 a6xx_gmu_fault，
+	 * 所以 gmu->hung 一直是 false。于是 a6xx_gmu_stop 走 a6xx_gmu_shutdown
+	 * （优雅 slumber）→ a6xx_hfi_wait_for_msg_interrupt 等 fault_coredump_done，
+	 * 而该 completion 需要 crashstate 采集（在 irq/21 线程）先拿 gpu->lock，
+	 * gpu->lock 又被 recover 持着 → 三方互锁，桌面卡 LOGO。
+	 *
+	 * 原厂 vendor 的 adreno_reset 对 fault 触发一律先软复位、不依赖 GMU
+	 * 优雅休眠握手，所以不死锁。这里等价处理：既然本次 recover 是 fault
+	 * 触发，直接置 gmu->hung，让 a6xx_gmu_stop 走 a6xx_gmu_force_off（强制
+	 * 关，不 slumber），彻底绕开无超时的 HFI 等待。
+	 */
+	a6xx_gpu->gmu.hung = true;
+
 	pm_runtime_dont_use_autosuspend(&gpu->pdev->dev);
 
 	/* active_submit won't change until we make a submission */
@@ -1620,12 +1640,29 @@ static void a6xx_recover(struct msm_gpu *gpu)
 	if (active_submits)
 		pm_runtime_put(&gpu->pdev->dev);
 
-	/* And the final one from recover worker */
-	pm_runtime_put_sync(&gpu->pdev->dev);
+	/*
+	 * And the final one from recover worker.
+	 *
+	 * [crux 2026-11-17] 捕获 suspend 结果：GMU 已挂时 a6xx_gmu_stop 会
+	 * 在 a6xx_hfi_wait_for_msg_interrupt 里超时返回 -ETIMEDOUT（该处已加
+	 * 重试上限，不再无限等 fault_coredump_done）。此时 GMU 没能优雅
+	 * slumber，pd_gate 也不会来，跳过等待以免再白等 1 秒并误报。
+	 */
+	{
+		int rpm_ret = pm_runtime_put_sync(&gpu->pdev->dev);
+
+		if (rpm_ret < 0 && rpm_ret != -EINPROGRESS) {
+			DRM_DEV_ERROR(&gpu->pdev->dev,
+				"recover: runtime suspend 失败 (%d)，GMU 可能已挂，跳过 pd_gate 等待\n",
+				rpm_ret);
+			goto skip_pd_gate;
+		}
+	}
 
 	if (!wait_for_completion_timeout(&gmu->pd_gate, msecs_to_jiffies(1000)))
 		DRM_DEV_ERROR(&gpu->pdev->dev, "cx gdsc didn't collapse\n");
 
+skip_pd_gate:
 	dev_pm_genpd_remove_notifier(gmu->cxpd);
 
 	pm_runtime_use_autosuspend(&gpu->pdev->dev);
