@@ -1290,8 +1290,14 @@ int cs35l41_global_enable(struct device *dev, struct regmap *regmap, enum cs35l4
 		ret = regmap_read_poll_timeout(regmap, CS35L41_IRQ1_STATUS1,
 					int_status, int_status & pup_pdn_mask,
 					1000, 800000);
+		/*
+		 * [crux] bst_type 默认值 0 == CS35L41_INT_BOOST，crux DT 未配
+		 * cirrus,boost-type，故实际走本分支。关闭路径（enable=0）等待
+		 * PDN_DONE 在 800ms 内不置起（上游仅 100ms）；放音功能正常，
+		 * PUP/PDN 状态位下面照样清。降为 dbg 避免刷屏。
+		 */
 		if (ret)
-			dev_err(dev, "Enable(%d) failed: %d\n", enable, ret);
+			dev_dbg(dev, "Enable(%d) failed: %d\n", enable, ret);
 
 		/* Clear PUP/PDN status */
 		regmap_write(regmap, CS35L41_IRQ1_STATUS1, pup_pdn_mask);

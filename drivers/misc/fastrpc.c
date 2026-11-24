@@ -1575,8 +1575,8 @@ err:
 	return err;
 }
 
-static int fastrpc_init_create_process(struct fastrpc_user *fl,
-					char __user *argp)
+static int fastrpc_init_create_process_kernel(struct fastrpc_user *fl,
+					      struct fastrpc_init_create *pinit)
 {
 	struct fastrpc_init_create init;
 	struct fastrpc_invoke_args *args;
@@ -1600,10 +1600,7 @@ static int fastrpc_init_create_process(struct fastrpc_user *fl,
 	if (!args)
 		return -ENOMEM;
 
-	if (copy_from_user(&init, argp, sizeof(init))) {
-		err = -EFAULT;
-		goto err;
-	}
+	init = *pinit;
 
 	if (init.attrs & FASTRPC_MODE_UNSIGNED_MODULE)
 		unsigned_module = true;
@@ -1738,6 +1735,43 @@ static int fastrpc_release_current_dsp_process(struct fastrpc_user *fl)
 
 	return fastrpc_internal_invoke(fl, true, FASTRPC_INIT_HANDLE,
 				       sc, &args[0]);
+}
+
+static int fastrpc_init_create_process(struct fastrpc_user *fl,
+					char __user *argp)
+{
+	struct fastrpc_init_create init;
+
+	if (copy_from_user(&init, argp, sizeof(init)))
+		return -EFAULT;
+
+	return fastrpc_init_create_process_kernel(fl, &init);
+}
+
+/* legacy msm-4.14 INIT: 40-byte struct with filefd for fastrpc_shell_3 */
+static int fastrpc_legacy_init(struct fastrpc_user *fl, char __user *argp)
+{
+	struct {
+		u32 flags;
+		u32 pad;
+		u64 file;
+		u32 filelen;
+		s32 filefd;
+		u64 mem;
+		u32 memlen;
+		s32 memfd;
+	} u;
+	struct fastrpc_init_create ic;
+
+	if (copy_from_user(&u, argp, sizeof(u)))
+		return -EFAULT;
+
+	memset(&ic, 0, sizeof(ic));
+	ic.filelen = u.filelen;
+	ic.filefd = u.filefd;
+	ic.attrs = 0;
+
+	return fastrpc_init_create_process_kernel(fl, &ic);
 }
 
 static int fastrpc_device_release(struct inode *inode, struct file *file)
@@ -2333,6 +2367,26 @@ static long fastrpc_device_ioctl(struct file *file, unsigned int cmd,
 	case FASTRPC_IOCTL_INIT_CREATE:
 		err = fastrpc_init_create_process(fl, argp);
 		break;
+	/* legacy msm-4.14 INIT: _IOWR('R', 6, 40-byte init) */
+	case 0xc0285206:
+	case 0xc030520a:	/* legacy INIT_ATTRS (48B, first 40B same) */
+		err = fastrpc_legacy_init(fl, argp);
+		break;
+	/* legacy CONTROL: reply status=1 (kernel alloc supported) */
+	case 0xc00c520c: {
+		struct {
+			u32 req;
+			u32 status;
+			u32 pad;
+		} c;
+
+		if (copy_from_user(&c, argp, sizeof(c)))
+			return -EFAULT;
+		c.status = 1;
+		if (copy_to_user(argp, &c, sizeof(c)))
+			return -EFAULT;
+		return 0;
+	}
 	case FASTRPC_IOCTL_ALLOC_DMA_BUFF:
 		err = fastrpc_dmabuf_alloc(fl, argp);
 		break;
@@ -2354,6 +2408,17 @@ static long fastrpc_device_ioctl(struct file *file, unsigned int cmd,
 	case FASTRPC_IOCTL_GET_DSP_INFO:
 		err = fastrpc_get_dsp_info(fl, argp);
 		break;
+	/* legacy msm-4.14 UAPI: GETINFO(in=cid, out=smmu_enabled=0 以走 rpcmem 分支) */
+	case 0xc0045208: {
+		u32 v;
+
+		if (get_user(v, (u32 __user *)argp))
+			return -EFAULT;
+		v = 0;
+		if (put_user(v, (u32 __user *)argp))
+			return -EFAULT;
+		return 0;
+	}
 	default:
 		err = -ENOTTY;
 		break;

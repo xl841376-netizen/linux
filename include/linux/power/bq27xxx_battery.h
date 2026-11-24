@@ -71,6 +71,11 @@ struct bq27xxx_device_info {
 	bool capacity_full_latched;	/* 已判定满充，对外 SOC 锁 100 */
 	bool ocv_fallback;		/* FCC 不可信，SOC 改由 OCV 估算 */
 	bool fcc_warned;		/* FCC 异常只告警一次 */
+	/* crux：读失败退避。i2c4 被扰动卡死时，bq27xxx_read 会卡在 geni_i2c
+	 * cancel/abort 里；连续失败则退避拉长轮询、缓存旧值，避免把 CPU 卡成
+	 * hard lockup，等总线恢复后自动回到正常节奏。 */
+	int consec_read_fails;		/* 连续读失败计数 */
+	unsigned long next_retry_jiffies; /* 退避到期时间（0=不限制） */
 	u8 ocv_soc;			/* OCV 估算出的 SOC（0~100） */
 	int learned_fcc_ua;		/* 本次选出的"学习容量"（µAh） */
 	struct delayed_work work;

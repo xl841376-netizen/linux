@@ -2058,19 +2058,46 @@ static void bq27xxx_battery_update_unlocked(struct bq27xxx_device_info *di)
 	struct bq27xxx_reg_cache cache = {0, };
 	bool has_singe_flag = di->opts & BQ27XXX_O_ZERO;
 
+	/* [crux] 退避：上一轮读失败且未到重试时间，直接沿用缓存，不碰 i2c。
+	 * 避免 i2c4 卡死期间每 360ms 重试一次、把 CPU 拖进 hard lockup。 */
+	if (di->next_retry_jiffies &&
+	    time_is_after_jiffies(di->next_retry_jiffies)) {
+		/* 保持旧 cache，不更新，只重排一个更远的定时器 */
+		if (!di->removed && poll_interval > 0)
+			mod_delayed_work(system_percpu_wq, &di->work,
+					 poll_interval * HZ);
+		return;
+	}
+
 	cache.flags = bq27xxx_read(di, BQ27XXX_REG_FLAGS, has_singe_flag);
 	if (di->chip == BQ27000 && (cache.flags & 0xff) == 0xff)
 		cache.flags = -ENODEV; /* bq27000 hdq read error */
-	if (cache.flags >= 0) {
-		cache.capacity = bq27xxx_battery_read_soc(di);
 
-		/*
-		 * On gauges with signed current reporting the current must be
-		 * checked to detect charging <-> discharging status changes.
-		 */
-		if (!(di->opts & BQ27XXX_O_ZERO))
-			bq27xxx_battery_current_and_status(di, NULL, &status, &cache);
+	if (cache.flags < 0) {
+		/* 读失败：指数退避，1s/2s/4s/8s，封顶 8s；不更新 cache */
+		unsigned long delay;
+
+		di->consec_read_fails++;
+		delay = min_t(unsigned long, 1UL << min(di->consec_read_fails, 3),
+			      8UL);
+		di->next_retry_jiffies = jiffies + delay * HZ;
+		if (!di->removed && poll_interval > 0)
+			mod_delayed_work(system_percpu_wq, &di->work, delay * HZ);
+		return;
 	}
+
+	/* 读成功：清退避，恢复正常节奏 */
+	di->consec_read_fails = 0;
+	di->next_retry_jiffies = 0;
+
+	cache.capacity = bq27xxx_battery_read_soc(di);
+
+	/*
+	 * On gauges with signed current reporting the current must be
+	 * checked to detect charging <-> discharging status changes.
+	 */
+	if (!(di->opts & BQ27XXX_O_ZERO))
+		bq27xxx_battery_current_and_status(di, NULL, &status, &cache);
 
 	if ((di->cache.capacity != cache.capacity) ||
 	    (di->cache.flags != cache.flags) ||
