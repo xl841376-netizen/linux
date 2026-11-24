@@ -296,8 +296,107 @@ module_param_named(suppress_uaf_read_faults, crux_suppress_uaf_read, bool, 0644)
 MODULE_PARM_DESC(suppress_uaf_read_faults,
 	"抑制落在已释放区间内部的读 fault（真 UAF，默认 0：只记录不抑制）");
 
+static bool crux_selfheal_uaf = true;
+module_param_named(selfheal_uaf_faults, crux_selfheal_uaf, bool, 0644);
+MODULE_PARM_DESC(selfheal_uaf_faults,
+	"真 UAF 读 fault 时主动请求 recover，不等 hangcheck 超时（默认 1）");
+
+/*
+ * [crux 2026-11-17] 主动 recover 的降级控制：
+ *
+ * 绝不在 fault handler 里同步排队 recover —— 该路径在 irq/21 线程中，
+ * 随后 crashstate_capture 要拿 gpu->lock，而 recover_worker 持锁等 GMU
+ * （a6xx_hfi_wait_for_msg_interrupt 唯一出口是 fault_coredump_done），
+ * 三方互锁会把桌面卡在 LOGO。改为延迟 work，等 fault handler 返回后再做。
+ *
+ * 状态机（单个原子标志 crux_recover_pending）：
+ *   0 = 空闲，允许排队下一次延迟 recover
+ *   1 = 已排队延迟 recover，尚未执行
+ *  delayed work 执行时无条件置 0（无论 recover 是否真正入队），
+ *  避免「done 标志与 work 执行脱节」导致后续 fault 永远走降级。
+ */
+static unsigned int crux_selfheal_delay_ms = 200;
+module_param_named(selfheal_uaf_delay_ms, crux_selfheal_delay_ms, uint, 0644);
+MODULE_PARM_DESC(selfheal_uaf_delay_ms,
+	"主动 recover 前的延迟（毫秒，默认 200；需大于 crashstate 采集耗时）");
+
+/* 0 = 空闲可排队；1 = 已排队未执行。work 执行时无条件清 0 */
+static atomic_t crux_recover_pending = ATOMIC_INIT(0);
+/* 延迟执行体；目标 gpu 由 work 回调时带出 */
+static struct delayed_work crux_recover_dwork_timer;
+static struct msm_gpu *crux_recover_gpu;
+
 static atomic_t crux_suppressed_faults = ATOMIC_INIT(0);
 static atomic_t crux_premature_frees = ATOMIC_INIT(0);
+
+/*
+ * [crux 2026-11-17] per-address 去重，对齐商业版 KGSL 的
+ * KGSL_FT_PAGEFAULT_LOG_ONE_PER_PAGE（见 vendor kgsl_iommu.c:882）。
+ *
+ * 同一个 iova 在一次 GPU 生命周期内只完整打印一次；重复命中只计数，
+ * 在下次不同地址出现时汇报一次累计值。避免 fault 风暴刷屏
+ * （实测同地址 0x104400000 连打 2 次）。
+ *
+ * 直接映射表无需加锁：iova 页号对 256 取模作槽位，同槽冲突时新地址
+ * 覆盖旧地址——只影响去重的精确度，不会漏报（覆盖后旧地址若再来会
+ * 重新打印一次，属可接受的弱保证）。
+ */
+#define CRUX_FAULT_HASH_BITS 8
+#define CRUX_FAULT_HASH_SIZE (1 << CRUX_FAULT_HASH_BITS)
+
+static unsigned long crux_fault_hash[CRUX_FAULT_HASH_SIZE];
+static atomic_t crux_dup_faults = ATOMIC_INIT(0);
+
+/*
+ * 返回 true 表示这个地址是重复的（调用方应跳过完整打印）。
+ * 成功记录新地址时，若之前累计过重复，顺带汇报一次。
+ */
+static bool crux_fault_addr_seen(unsigned long iova)
+{
+	unsigned long page = iova >> PAGE_SHIFT;
+	unsigned int slot = (unsigned int)(page & (CRUX_FAULT_HASH_SIZE - 1));
+	int dups;
+
+	if (crux_fault_hash[slot] == (page ? page : 1UL))
+		return true;
+
+	crux_fault_hash[slot] = page ? page : 1UL;
+
+	dups = atomic_xchg(&crux_dup_faults, 0);
+	if (dups)
+		pr_info("gpu fault: 另有 %d 次同地址重复 fault 已去重\n", dups);
+
+	return false;
+}
+
+/*
+ * [crux 2026-11-17] 延迟 recover 执行体。
+ *
+ * 在 system_wq 上运行（非 fault 中断上下文），此时 fault handler 早已返回、
+ * crashstate 采集也已完成（或已放弃），因此不会与 gpu->lock 冲突。
+ * 复用 gpu->recover_work，语义与 hangcheck 触发完全一致。
+ */
+static void crux_recover_work_fn(struct work_struct *work)
+{
+	struct msm_gpu *gpu = READ_ONCE(crux_recover_gpu);
+
+	/* 无论 recover 是否真正入队，都无条件清标志，允许下次再排 */
+	atomic_set(&crux_recover_pending, 0);
+
+	if (!gpu)
+		return;
+
+	if (READ_ONCE(gpu->crashstate)) {
+		/* 已有崩溃快照：recovery 已在跑，交还给它 */
+		pr_info("gpu fault: 延迟 recover 跳过（recovery 已在进行）\n");
+		return;
+	}
+
+	if (!kthread_queue_work(gpu->worker, &gpu->recover_work))
+		pr_info("gpu fault: 延迟 recover 排队失败，交 hangcheck\n");
+	else
+		pr_info("gpu fault: 延迟 recover 已入队\n");
+}
 
 int adreno_fault_handler(struct msm_gpu *gpu, unsigned long iova, int flags,
 			 struct adreno_smmu_fault_info *info, const char *block,
@@ -361,13 +460,85 @@ int adreno_fault_handler(struct msm_gpu *gpu, unsigned long iova, int flags,
 
 		if (cls == 1 || cls == 2) {
 			atomic_inc(&crux_premature_frees);
-			pr_warn_ratelimited("---- premature free ---- [%llx-%llx] 释放者 pid=%u comm=%s%s\n",
-				fs, fe, fpid, fcomm,
-				cls == 1 ? "（真 UAF：GPU 读已释放区间内部）"
-					 : "（overfetch，未抑制）");
-			if (cls == 1 && crux_suppress_uaf_read)
+			if (crux_fault_addr_seen(iova)) {
+				atomic_inc(&crux_dup_faults);
 				return 0;
+			}
+			/*
+			 * [crux 2026-11-24] suppress_uaf_read_faults 现在只负责
+			 * 「静默」，不再提前 return —— 早先的写法把后面的主动
+			 * recover 一起跳过了，UAF 只能干等 hangcheck 超时，代价是
+			 * 多卡约 1s（现场见过 plasmashell "Context is lost"）。
+			 * 打印与自愈解耦：抑制只压日志，自愈照常进行。
+			 */
+			if (!(cls == 1 && crux_suppress_uaf_read))
+				pr_warn_ratelimited("---- premature free ---- [%llx-%llx] 释放者 pid=%u comm=%s%s\n",
+					fs, fe, fpid, fcomm,
+					cls == 1 ? "（真 UAF：GPU 读已释放区间内部）"
+						 : "（overfetch，未抑制）");
+
+			/*
+			 * [crux 2026-11-17] 精细化自愈：真 UAF 读不可恢复。
+			 *
+			 * 页表项已撤销，GPU 重试同一条命令必然再次 fault，
+			 * 干等 hangcheck 超时（默认 1s）只会让画面多卡一段时间。
+			 * 这里主动请求 recover —— 复用现成的 recover_work，
+			 * 语义与 hangcheck 触发完全一致（skip 掉出错 submit +
+			 * replay 其余），不引入新的复位路径。
+			 *
+			 * 只对 cls == 1（落在已释放区间内部）触发；
+			 * overfetch（cls == 2）是良性 UCHE 预取，不触发。
+			 */
+			if (cls == 1 && crux_selfheal_uaf) {
+				/*
+				 * [crux 2026-11-17] 分级降级：绝不在此处同步排队。
+				 *
+				 * 死锁教训（两次复现，开机 ~18.9s）：本函数运行在
+				 * irq/21-arm-smmu-context-fault 线程里，随后
+				 * msm_gpu_fault_crashstate_capture() 要拿 gpu->lock；
+				 * 而 recover_worker 持着 gpu->lock 调 a6xx_gmu_stop
+				 * → a6xx_hfi_wait_for_msg_interrupt()，该函数唯一的
+				 * 退出条件是 fault_coredump_done（需 crashstate 采集
+				 * 完成才会 signal）→ 三方互锁，桌面卡 LOGO。
+				 *
+				 * 改为延迟排队，等 fault handler 与 crashstate 采集
+				 * 都退出后再 recover，避开持锁窗口。
+				 *
+				 * 分级分支（单一 pending 标志，语义简单）：
+				 *  1) 已有 crashstate → recovery 在进行，只记录
+				 *  2) 已排队未执行（pending=1）→ 只记录，不重复排
+				 *  3) 空闲 → 置 pending=1 并排延迟 work
+				 */
+				if (READ_ONCE(gpu->crashstate)) {
+					/* 分支 1：recovery 进行中 */
+					pr_info("gpu fault: 真 UAF 读，recovery 进行中（降级：只记录）\n");
+				} else if (atomic_cmpxchg(&crux_recover_pending, 0, 1) == 0) {
+					/* 分支 3：空闲 → 排队 */
+					WRITE_ONCE(crux_recover_gpu, gpu);
+					schedule_delayed_work(&crux_recover_dwork_timer,
+							      msecs_to_jiffies(crux_selfheal_delay_ms));
+					pr_info("gpu fault: 真 UAF 读，已排定 %ums 后 recover（绕过 crashstate 持锁窗口）\n",
+						crux_selfheal_delay_ms);
+				} else {
+					/* 分支 2：已排队未执行 */
+					pr_info("gpu fault: 真 UAF 读，recover 已排定中（降级：只记录）\n");
+				}
+			}
+		} else if (crux_fault_addr_seen(iova)) {
+			/* 非 UAF 类的重复地址，同样只计数 */
+			atomic_inc(&crux_dup_faults);
+			return 0;
 		}
+
+		/*
+		 * [crux 2026-11-24] 真 UAF 读且抑制打开：自愈已经在上面排好，
+		 * 这里直接返回，跳过下面无条件的 "*** gpu fault" 与
+		 * msm_gem_vma_trace_dump()（后者会打 "*** GPU PAGE FAULT" 和
+		 * "---- premature free ----"）。此前抑制只挡了 pr_warn，
+		 * dump 在 cls 分支之外照打，所以开机仍有 3 条噪声。
+		 */
+		if (cls == 1 && crux_suppress_uaf_read)
+			return 0;
 	}
 
 	pr_warn_ratelimited("*** gpu fault: ttbr0=%.16llx iova=%.16lx dir=%s type=%s source=%s (%u,%u,%u,%u)\n",
@@ -1257,6 +1428,9 @@ int adreno_gpu_init(struct drm_device *drm, struct platform_device *pdev,
 	adreno_gpu->funcs = funcs;
 	adreno_gpu->info = config->info;
 	adreno_gpu->chip_id = config->chip_id;
+
+	/* [crux] 初始化延迟 recover 的工作项（见 crux_recover_work_fn） */
+	INIT_DELAYED_WORK(&crux_recover_dwork_timer, crux_recover_work_fn);
 
 	gpu->allow_relocs = config->info->family < ADRENO_6XX_GEN1;
 	gpu->pdev = pdev;

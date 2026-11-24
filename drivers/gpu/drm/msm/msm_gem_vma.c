@@ -65,8 +65,13 @@ static void msm_vma_trace_add(const char *op, u64 iova, u64 range)
  *   1 = fault 落在"刚被释放"的区间内部      -> 真 UAF（商业版只记 premature free）
  *   2 = fault 落在刚释放区间末尾 64B 以内    -> UCHE overfetch（商业版直接抑制）
  * 只统计最近 MSM_VMA_TRACE_WINDOW 内的释放记录。
+ *
+ * [crux 2026-11-24] 窗口 5s -> 60s：plasmashell 启动期一次 fault 的释放者
+ * 距 fault 有 63 次 VMA 操作，5s 窗口覆盖不到，于是 cls 归 0、走不到抑制分支，
+ * 打出 *** GPU PAGE FAULT 噪声。环形缓冲只有 256 槽，60s 内若不溢出，
+ * 覆盖率提升而内存不增（实测该 case 仅 63 次操作，远未绕回）。
  */
-#define MSM_VMA_TRACE_WINDOW	(5 * HZ)
+#define MSM_VMA_TRACE_WINDOW	(60 * HZ)
 
 int msm_gem_vma_trace_classify(u64 iova, u64 *start, u64 *end,
 			       u32 *pid, char comm[16])
@@ -80,8 +85,14 @@ int msm_gem_vma_trace_classify(u64 iova, u64 *start, u64 *end,
 
 		if (!e->op)
 			break;
+		/*
+		 * Skip (don't stop at) entries older than the window: an older
+		 * release sitting between us and the interesting one must not
+		 * hide it.  msm_gem_vma_trace_dump() already scans the whole
+		 * ring the same way, so this keeps the two views consistent.
+		 */
 		if (time_after(jiffies, e->when + MSM_VMA_TRACE_WINDOW))
-			break;
+			continue;
 
 		if (iova >= e->iova && iova < e->iova + e->range) {
 			*start = e->iova;
