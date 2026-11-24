@@ -938,6 +938,56 @@
 &remoteproc_cdsp {
 	status = "okay";
 	firmware-name = "qcom/sm8150/xiaomi/crux/cdsp.mbn";
+	glink-edge {
+		fastrpc {
+			memory-region = <&fastrpc_mem>;
+
+			/* [crux] 原厂 sdmshrike(sm8150) 的 cdsp fastrpc compute-cb
+			 * iommus 值。主线 sm8150.dtsi 用的是错的 0x1001..0x1008，
+			 * 且缺 dma-coherent，导致 fastrpc_buf_alloc 的
+			 * dma_alloc_coherent(4MB) 在 iommu_dma 的 sg 表构建时崩溃。 */
+			compute-cb@1 {
+				iommus = <&apps_smmu 0x1401 0x2040>,
+					 <&apps_smmu 0x1421 0x0>,
+					 <&apps_smmu 0x2001 0x420>,
+					 <&apps_smmu 0x2041 0x0>;
+				dma-coherent;
+			};
+			compute-cb@2 {
+				iommus = <&apps_smmu 0x2 0x3440>,
+					 <&apps_smmu 0x22 0x3400>;
+				dma-coherent;
+			};
+			compute-cb@3 {
+				iommus = <&apps_smmu 0x3 0x3440>,
+					 <&apps_smmu 0x1423 0x0>,
+					 <&apps_smmu 0x2023 0x0>;
+				dma-coherent;
+			};
+			compute-cb@4 {
+				iommus = <&apps_smmu 0x4 0x3440>,
+					 <&apps_smmu 0x24 0x3400>;
+				dma-coherent;
+			};
+			compute-cb@5 {
+				iommus = <&apps_smmu 0x5 0x3440>,
+					 <&apps_smmu 0x25 0x3400>;
+				dma-coherent;
+			};
+			compute-cb@6 {
+				iommus = <&apps_smmu 0x6 0x3460>;
+				dma-coherent;
+			};
+			compute-cb@7 {
+				iommus = <&apps_smmu 0x7 0x3460>;
+				dma-coherent;
+			};
+			compute-cb@8 {
+				iommus = <&apps_smmu 0x8 0x3460>;
+				dma-coherent;
+			};
+		};
+	};
 };
 
 &remoteproc_mpss {
@@ -1010,6 +1060,17 @@
 	status = "okay";
 
 	reset-gpios = <&tlmm 175 GPIO_ACTIVE_LOW>;
+
+	/*
+	 * [crux] 原厂 4.14 用 msm_bus_scale 做 UFS 带宽投票
+	 * (qcom,msm-bus,vectors-KBps，26 档)；主线移植只搬了驱动没搬 DT，
+	 * 于是 ufs_qcom_icc_init() 拿到 NULL 路径、投票为空。
+	 * 这里补上标准 interconnect 路径；具体带宽值由 ufs_qcom_bw_table
+	 * 按 MODE/GEAR/LANE 提供，DT 只声明拓扑。
+	 */
+	interconnects = <&aggre1_noc MASTER_UFS_MEM 0 &mc_virt SLAVE_EBI_CH0 0>,
+			<&gem_noc MASTER_AMPSS_M0 0 &config_noc SLAVE_UFS_MEM_CFG 0>;
+	interconnect-names = "ufs-ddr", "cpu-ufs";
 
 	vcc-supply = <&vreg_l10a_2p5>;
 	vcc-max-microamp = <750000>;
@@ -1854,6 +1915,13 @@
 };
 
 /*
+ * [crux] 2026-11-15：minidump 相关实验（qcom,dload-mode / tcsr_boot_misc /
+ * sram / minidump-sram@1c）已全部拆除。原因：这台设备的工厂/商业 XBL
+ * 均无 minidump boot firmware 支持（xbl.elf 明文里 "minidump" 0 命中），
+ * 加 sram 还会让设备卡在进内核。日志仍走 ramoops + pstore。
+ */
+
+/*
  * [crux 2026-10-11] 关机必查项：这些驱动必须出现在 device_shutdown 的关机经过里，
  * 否则代理会在 report 里报 MISSING。X50 相关（qcom-pcie / mhi-pci-generic）暂不列，
  * 免得每轮误报。
@@ -2272,12 +2340,12 @@
 		ramoops@b0000000 {
 			compatible = "ramoops";
 			reg = <0x0 0xb0000000 0x0 0x400000>;
-			record-size = <0x100000>;
+			record-size = <0xE0000>;
 			/* crux: 原来 console-size=0，重启后拿不到上一次的内核日志；
 			 * 开 256KB 控制台缓冲，配合 cmdline 的 pstore.kmsg_bytes=262144 */
 			console-size = <0x40000>;
 			pmsg-size = <0>;
-			ecc-size = <0x10>;
+			ecc-size = <0x40>;
 		};
 	};
 };

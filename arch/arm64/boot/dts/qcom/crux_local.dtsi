@@ -209,6 +209,9 @@
 		interrupt-names = "error_irq", "wdg_bite_irq", "ipc_irq";
 		iommus = <&apps_smmu 0x1081 0x400>;
 
+		cache-slice-names = "npu";
+		cache-slices = <&llcc 23>;
+
 		qcom,npu-pwrlevels {
 			#address-cells = <1>;
 			#size-cells = <0>;

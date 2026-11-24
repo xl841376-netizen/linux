@@ -19,6 +19,7 @@
 #include <dt-bindings/clock/qcom,gpucc-sm8150.h>
 #include <dt-bindings/clock/qcom,videocc-sm8150.h>
 #include <dt-bindings/interconnect/qcom,osm-l3.h>
+#include <dt-bindings/interconnect/qcom,icc.h>
 #include <dt-bindings/interconnect/qcom,sm8150.h>
 #include <dt-bindings/clock/qcom,sm8150-camcc.h>
 #include <dt-bindings/thermal/thermal.h>
@@ -1832,7 +1833,7 @@
 			qcom,bcm-voters = <&apps_bcm_voter>;
 		};
 
-		system-cache-controller@9200000 {
+		llcc: system-cache-controller@9200000 {
 			compatible = "qcom,sm8150-llcc";
 			reg = <0 0x09200000 0 0x50000>, <0 0x09280000 0 0x50000>,
 			      <0 0x09300000 0 0x50000>, <0 0x09380000 0 0x50000>,
@@ -4628,6 +4629,13 @@
 
 			apps_bcm_voter: bcm-voter {
 				compatible = "qcom,bcm-voter";
+				/* [crux] AMC 投票不等 RSC 回 RESP（对齐原厂 mailbox
+				 * fire-and-forget 语义）。默认 QCOM_ICC_TAG_ACTIVE_ONLY
+				 * 含 AMC bit，会让 rpmh_write_batch 要求 RSC 回 RESP，
+				 * 本机 RSC 对某些 AMC 地址不回 -> 10s 超时 -110 ->
+				 * 连锁打挂整个 RSC -> i2c4 时钟失效 -> hard lockup。
+				 * 只保留 WAKE 等待。 */
+				qcom,tcs-wait = <QCOM_ICC_TAG_WAKE>;
 			};
 		};
 
