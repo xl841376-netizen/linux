@@ -247,6 +247,17 @@ config QCOM_Q6V5_PAS
 	  subsystems such as ADSP (Audio DSP), CDSP (Compute DSP), MPSS (Modem
 	  Peripheral SubSystem), and SLPI (Sensor Low Power Island).
 
+config QCOM_NPU_PAS
+	tristate "Qualcomm SM8150 NPU PAS support"
+	depends on OF && ARCH_QCOM
+	select QCOM_MDT_LOADER
+	select QCOM_PAS
+	select QCOM_SCM
+	help
+	  Say y here to enable the NPU (HTA) via the TrustZone PAS
+	  interface. This exposes the NPU as a standard remoteproc
+	  instance so it can coexist with the cdsp fastrpc stack.
+
 config QCOM_Q6V5_WCSS
 	tristate "Qualcomm Hexagon based WCSS Peripheral Image Loader"
 	depends on OF && ARCH_QCOM

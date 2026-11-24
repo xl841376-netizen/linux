@@ -96,9 +96,54 @@ phys_addr_t __ro_after_init arm64_dma_phys_limit;
 #define ARM64_MEMSTART_ALIGN	(1UL << ARM64_MEMSTART_SHIFT)
 #endif
 
+/*
+ * [crux] 从设备树读 crash 区（仿 powerpc 的 linux,crashkernel-*）
+ *
+ * 上游 arm64 只认 cmdline 的 crashkernel=。本机引导链改一行代价高，
+ * 补一条 DT 路径：
+ *
+ *	chosen {
+ *		linux,crashkernel-size = <0x0 0x10000000>;	// 必须
+ *		linux,crashkernel-base = <0x0 0x360000000>;	// 可选
+ *	};
+ *
+ * **base 建议不写**：省掉 base 就等价于 cmdline 的 crashkernel=256M，
+ * 由 memblock 在空闲区里自己挑位置，天然避开所有 reserved-memory
+ * （NPU/GPU/modem/ramoops/CMA 全不会被碰）。写死 base 只在需要
+ * 确定性布局时才用，且必须自己核对没踩到保留区。
+ *
+ * cmdline 带 crashkernel= 时一律以 cmdline 为准。
+ */
+static int __init dt_parse_crashkernel(unsigned long long *size,
+				       unsigned long long *base)
+{
+	u64 sz = 0, bs = 0;
+
+	if (!of_chosen)
+		return -ENODEV;
+
+	if (of_property_read_u64(of_chosen, "linux,crashkernel-size", &sz)) {
+		u32 v32;
+
+		if (of_property_read_u32(of_chosen, "linux,crashkernel-size", &v32))
+			return -ENOENT;
+		sz = v32;
+	}
+	if (of_property_read_u64(of_chosen, "linux,crashkernel-base", &bs)) {
+		u32 v32;
+
+		if (!of_property_read_u32(of_chosen, "linux,crashkernel-base", &v32))
+			bs = v32;
+	}
+
+	*size = sz;
+	*base = bs;
+	return 0;
+}
+
 static void __init arch_reserve_crashkernel(void)
 {
-	unsigned long long crash_base, crash_size, cma_size = 0;
+	unsigned long long crash_base = 0, crash_size = 0, cma_size = 0;
 	unsigned long long low_size = 0;
 	bool high = false;
 	int ret;
@@ -109,7 +154,20 @@ static void __init arch_reserve_crashkernel(void)
 	ret = parse_crashkernel(boot_command_line, memblock_phys_mem_size(),
 				&crash_size, &crash_base,
 				&low_size, &cma_size, &high);
-	if (ret)
+	if (ret) {
+		/* cmdline 没给 → 退回设备树 */
+		crash_size = 0;
+		crash_base = 0;
+		if (dt_parse_crashkernel(&crash_size, &crash_base)) {
+			pr_info("crashkernel: 既无 cmdline 也无 DT 预留\n");
+			return;
+		}
+		pr_info("crashkernel: DT 预留 base=0x%llx size=0x%llx%s\n",
+			crash_base, crash_size,
+			crash_base ? "" : "（base=0，由 memblock 自行挑选）");
+	}
+
+	if (!crash_size)
 		return;
 
 	reserve_crashkernel_generic(crash_size, crash_base, low_size, high);

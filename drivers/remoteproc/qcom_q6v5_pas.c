@@ -23,6 +23,9 @@
 #include <linux/platform_device.h>
 #include <linux/pm_domain.h>
 #include <linux/pm_runtime.h>
+#ifdef CONFIG_CRUX_DEP
+#include <linux/crux_dep.h>
+#endif
 #include <linux/firmware/qcom/qcom_pas.h>
 #include <linux/firmware/qcom/qcom_scm.h>
 #include <linux/regulator/consumer.h>
@@ -358,6 +361,15 @@ static int qcom_pas_start(struct rproc *rproc)
 	/* firmware is used to pass reference from qcom_pas_start(), drop it now */
 	pas->firmware = NULL;
 
+	/*
+	 * [crux] publish "this remote processor is running" so that consumers
+	 * (notably crux_esoc's reset path) can refuse to disturb hardware that
+	 * a live subsystem still depends on.
+	 */
+#ifdef CONFIG_CRUX_DEP
+	crux_dep_set(rproc->name, CRUX_DEP_UP);
+#endif
+
 	return 0;
 
 unmap_carveout:
@@ -419,6 +431,10 @@ static int qcom_pas_stop(struct rproc *rproc)
 	int handover;
 	int dtb_ret;
 	int ret;
+
+#ifdef CONFIG_CRUX_DEP
+	crux_dep_set(rproc->name, CRUX_DEP_DOWN);
+#endif
 
 	ret = qcom_q6v5_request_stop(&pas->q6v5, pas->sysmon);
 	if (ret == -ETIMEDOUT)
@@ -534,6 +550,9 @@ static unsigned long qcom_pas_panic(struct rproc *rproc)
 {
 	struct qcom_pas *pas = rproc->priv;
 
+#ifdef CONFIG_CRUX_DEP
+	crux_dep_set(rproc->name, CRUX_DEP_ERROR);
+#endif
 	return qcom_q6v5_panic(&pas->q6v5);
 }
 
